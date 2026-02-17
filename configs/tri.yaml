@@ -1,0 +1,34 @@
+# Default configuration (PHANTOM paper settings)
+debug: false
+verbose: false
+skip_existing: false
+n_processes: 1
+data_root_dir: "../data/raw/"
+processed_data_root_dir: "../data/processed/"
+demo_name: ""
+
+# Processing settings
+mode: ["bbox"]  # Default processing mode
+demo_num: null  # Process specific demo number (null = process all videos in the root folder)
+
+# Additional settings
+debug_cameras: [] # Add other robomimic cameras like sideview, etc. Warning: this significantly slows down the processing time
+
+
+# EPIC-KITCHENS configuration override
+# NOTE: input_resolution should match the video that is fed to the pipeline.
+# TRI videos are downsampled from 1920x1080 to 456x256 by convert_tri_to_epic.py
+# to avoid GPU out of memory when inpainting (epic=true does not resize in handinpaint_processor).
+input_resolution: 256
+output_resolution: 256
+robot: "Kinova3"
+gripper: "Robotiq85"
+square: false
+epic: true
+bimanual_setup: "shoulders"
+target_hand: "both"
+constrained_hand: false
+depth_for_overlay: false
+render: false
+camera_intrinsics: "camera/camera_intrinsics_tri.json"
+camera_extrinsics: "camera/camera_extrinsics_tri.json"
