@@ -21,7 +21,8 @@ debug_cameras: [] # Add other robomimic cameras like sideview, etc. Warning: thi
 # to avoid GPU out of memory when inpainting (epic=true does not resize in handinpaint_processor).
 input_resolution: 256
 output_resolution: 256
-robot: "Kinova3"
+# robot: "Kinova3"
+robot: "Panda"
 gripper: "Robotiq85"
 square: false
 epic: true

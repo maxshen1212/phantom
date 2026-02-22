@@ -1,7 +1,7 @@
 """
 Hand Processor Module
 
-This module converts detected hand bounding boxes into detailed 3D hand poses using 
+This module converts detected hand bounding boxes into detailed 3D hand poses using
 state-of-the-art pose estimation models, with optional depth-based refinement for improved accuracy.
 
 Processing Pipeline:
@@ -46,14 +46,14 @@ from phantom.processors.segmentation_processor import HandSegmentationProcessor
 
 logger = logging.getLogger(__name__)
 
-class HandBaseProcessor(BaseProcessor): 
+class HandBaseProcessor(BaseProcessor):
     """
     Base class for hand pose processing using HaMeR detection and optional depth refinement.
-    
+
     The processor operates on the output of BBoxProcessor, using detected hand bounding boxes
     to guide pose estimation. It supports both 2D and 3D processing modes, with the 3D mode
     providing enhanced accuracy through depth sensor integration.
-    
+
     Processing Workflow:
     1. Load video frames and bounding box detection results
     2. For each frame with detected hands:
@@ -63,7 +63,7 @@ class HandBaseProcessor(BaseProcessor):
        - Optionally apply depth-based pose refinement
     3. Generate temporal hand sequences with smooth trajectories
     4. Save processed results and visualization videos
-    
+
     Attributes:
         process_hand_masks (bool): Whether to generate hand segmentation masks
         apply_depth_alignment (bool): Whether to use depth-based pose refinement
@@ -78,7 +78,7 @@ class HandBaseProcessor(BaseProcessor):
     def __init__(self, args: argparse.Namespace) -> None:
         """
         Initialize the hand processor with configuration parameters.
-        
+
         Args:
             args: Command line arguments containing processing configuration
                  including depth processing flags and model parameters
@@ -92,23 +92,23 @@ class HandBaseProcessor(BaseProcessor):
     def _initialize_detectors(self) -> None:
         """
         Initialize all required detection models.
-        
-        Sets up the HaMeR detector for hand pose estimation. 
+
+        Sets up the HaMeR detector for hand pose estimation.
         """
         self.detector_hamer = DetectorHamer()
 
     def process_one_demo(self, data_sub_folder: str) -> None:
         """
         Process a single demonstration video to extract hand poses and segmentation.
-        
+
         Args:
             data_sub_folder: Path to the demonstration data folder containing
                            video files, bounding box data, and optional depth data
         """
         save_folder = self.get_save_folder(data_sub_folder)
-   
+
         paths = self.get_paths(save_folder)
-        
+
         # Load RGB video frames
         imgs_rgb = media.read_video(getattr(paths, f"video_left"))
         self.H, self.W, _ = imgs_rgb[0].shape
@@ -147,7 +147,7 @@ class HandBaseProcessor(BaseProcessor):
             self._get_hand_masks(data_sub_folder, left_sequence, right_sequence)
             self.left_masks = np.load(paths.masks_hand_left)
             self.right_masks = np.load(paths.masks_hand_right)
-        
+
         # Apply depth-based pose refinement if enabled
         if self.apply_depth_alignment:
             left_sequence = self._process_all_frames_depth_alignment(imgs_rgb, left_hand_detected, "left", left_sequence)
@@ -156,21 +156,21 @@ class HandBaseProcessor(BaseProcessor):
         # Save processed sequences and generate visualizations
         self._save_results(paths, left_sequence, right_sequence)
 
-    def _process_all_frames(self, imgs_rgb: np.ndarray, bboxes: np.ndarray, 
+    def _process_all_frames(self, imgs_rgb: np.ndarray, bboxes: np.ndarray,
                             hand_detections: np.ndarray, hand_side: str) -> HandSequence:
         """
         Process all frames in a video sequence to extract hand poses.
-        
+
         This method iterates through all video frames, applying pose estimation
         where hands are detected and creating empty frames where they are not.
         It maintains temporal consistency and provides quality filtering.
-        
+
         Args:
             imgs_rgb: RGB video frames, shape (num_frames, height, width, 3)
             bboxes: Hand bounding boxes per frame, shape (num_frames, 4)
             hand_detections: Boolean flags indicating valid detections per frame
             hand_side: "left" or "right" to specify which hand is being processed
-            
+
         Returns:
             HandSequence object containing processed pose data for all frames
         """
@@ -186,29 +186,29 @@ class HandBaseProcessor(BaseProcessor):
                 continue
 
             # Process frame with detected hand
-            frame_data = self._process_frame(img_idx, imgs_rgb[img_idx], bboxes[img_idx], 
+            frame_data = self._process_frame(img_idx, imgs_rgb[img_idx], bboxes[img_idx],
                                             hand_side)
             sequence.add_frame(frame_data)
 
         return sequence
-    
-    def _process_frame(self, img_idx: int, img_rgb: np.ndarray, bbox: np.ndarray, 
+
+    def _process_frame(self, img_idx: int, img_rgb: np.ndarray, bbox: np.ndarray,
                        hand_side: str, view: bool = False) -> HandFrame:
         """
         Process a single frame to extract hand pose and validate quality.
-        
+
         This method applies HaMeR pose estimation within the detected bounding box
         and performs quality checks to ensure the pose is suitable for downstream
         processing. Poor quality poses (e.g., hands too close to image edges) are
         rejected to maintain data quality.
-        
+
         Args:
             img_idx: Index of the current frame
             img_rgb: RGB image data for this frame
             bbox: Hand bounding box coordinates [x1, y1, x2, y2]
             hand_side: "left" or "right" specifying which hand is being processed
             view: Whether to display debug visualizations
-            
+
         Returns:
             HandFrame object containing pose data or empty frame if quality is poor
         """
@@ -217,13 +217,13 @@ class HandBaseProcessor(BaseProcessor):
             processed_data = self._process_image_with_hamer(img_rgb, bbox[None,...], hand_side, img_idx, view=view)
 
             # Quality check: reject poses where keypoints are too close to image edges
-            if self.are_kpts_too_close_to_margin(processed_data["kpts_2d"], self.W, self.H, margin=5, threshold=0.1):
+            if self.are_kpts_too_close_to_margin(processed_data["kpts_2d"], self.W, self.H, margin=5, threshold=0.9):
                 logger.error(f"Error processing frame {img_idx}: Edge hand")
                 return HandFrame.create_empty_frame(
                     frame_idx=img_idx,
                     img_rgb=img_rgb,
                 )
-            
+
             # Create frame with validated pose data
             frame_data = HandFrame(
                 frame_idx=img_idx,
@@ -235,7 +235,7 @@ class HandBaseProcessor(BaseProcessor):
             )
 
             return frame_data
-            
+
         except Exception as e:
             logger.error(f"Error processing frame {img_idx}: {str(e)}")
             return HandFrame.create_empty_frame(
@@ -243,11 +243,11 @@ class HandBaseProcessor(BaseProcessor):
                 img_rgb=img_rgb,
             )
 
-    def are_kpts_too_close_to_margin(self, kpts_2d: np.ndarray, img_width: int, img_height: int, 
+    def are_kpts_too_close_to_margin(self, kpts_2d: np.ndarray, img_width: int, img_height: int,
                                    margin: int = 20, threshold: float = 0.5) -> bool:
         """
         Filter hand keypoints based on proximity to image edges.
-        
+
         This quality check rejects hand poses where too many keypoints are near
         the image boundaries, which typically indicates partial occlusion or
         tracking errors that would lead to poor pose estimates.
@@ -279,7 +279,7 @@ class HandBaseProcessor(BaseProcessor):
     def _save_results(self, paths: Paths, left_sequence: HandSequence, right_sequence: HandSequence) -> None:
         """
         Save processed hand sequences and generate visualization videos.
-        
+
         Args:
             paths: Paths object containing output file locations
             left_sequence: Processed left hand pose sequence
@@ -312,33 +312,33 @@ class HandBaseProcessor(BaseProcessor):
             img_hamer_right = right_sequence.imgs_hamer[idx]
             img_bbox = imgs_bbox[idx]
             img_sam = imgs_sam[idx]
-            
+
             # Combine visualizations in 2x2 grid: [bbox, sam] on top, [left_hand, right_hand] on bottom
             annot_img = np.vstack((np.hstack((img_bbox, img_sam)), np.hstack((img_hamer_left, img_hamer_right)))).astype(np.uint8)
             annot_imgs.append(annot_img)
-            
+
         # Save comprehensive visualization video
         media.write_video(getattr(paths, f"video_annot"), np.array(annot_imgs), fps=10, codec="h264") # mp4
 
     def _create_hand_mesh(self, hamer_out: Dict[str, Any]) -> trimesh.Trimesh:
         """
         Create a 3D triangle mesh from HaMeR pose estimation output.
-        
+
         Args:
             hamer_out: HaMeR output dictionary containing vertex positions
-            
+
         Returns:
             Trimesh object representing the hand mesh
         """
         return trimesh.Trimesh(hamer_out["verts"].copy(), self.detector_hamer.faces_left.copy(), process=False)
-    
+
     def _get_hand_masks(self, data_sub_folder: str, hamer_data_left: HandSequence, hamer_data_right: HandSequence) -> None:
         """
         Generate hand segmentation masks using processed pose data.
-        
+
         This method integrates with the segmentation processor to generate
         detailed hand masks that can be used for depth-based pose refinement.
-        
+
         Args:
             data_sub_folder: Path to demonstration data folder
             hamer_data_left: Processed left hand sequence for guidance
@@ -355,14 +355,14 @@ class HandBaseProcessor(BaseProcessor):
                                 img_depth: np.ndarray, cam_intrinsics: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray]:
         """
         Identify visible hand vertices and their corresponding depth points.
-        
+
         Args:
             detector_hamer: HaMeR detector instance for coordinate projections
             hamer_out: HaMeR output containing pose estimates and camera parameters
             mesh: 3D hand mesh generated from HaMeR output
             img_depth: Depth image corresponding to the RGB frame
             cam_intrinsics: Camera intrinsic parameters for 3D projection
-            
+
         Returns:
             Tuple of (visible_points_3d, visible_hamer_vertices):
                 - visible_points_3d: 3D points from depth image at visible mesh locations
@@ -370,44 +370,44 @@ class HandBaseProcessor(BaseProcessor):
         """
         # Perform ray-casting to identify visible mesh vertices
         visible_hamer_vertices, _ = get_visible_points(mesh, origin=np.array([0,0,0]))
-        
+
         # Project 3D vertices to 2D image coordinates
         visible_points_2d = detector_hamer.project_3d_kpt_to_2d(
-            (visible_hamer_vertices-hamer_out["T_cam_pred"].cpu().numpy()).astype(np.float32), 
-            hamer_out["img_w"], hamer_out["img_h"], hamer_out["scaled_focal_length"], 
+            (visible_hamer_vertices-hamer_out["T_cam_pred"].cpu().numpy()).astype(np.float32),
+            hamer_out["img_w"], hamer_out["img_h"], hamer_out["scaled_focal_length"],
             hamer_out["camera_center"], hamer_out["T_cam_pred"])
 
         # Filter out points that fall outside the depth image boundaries
         original_visible_points_2d = visible_points_2d.copy()
 
         # Create valid region mask (note: depth indexing is [y, x])
-        valid_mask = ((original_visible_points_2d[:, 0] < img_depth.shape[1]) & 
+        valid_mask = ((original_visible_points_2d[:, 0] < img_depth.shape[1]) &
                      (original_visible_points_2d[:, 1] < img_depth.shape[0]))
 
         visible_points_2d = visible_points_2d[valid_mask]
         visible_hamer_vertices = visible_hamer_vertices[valid_mask]
-        
+
         # Convert 2D depth pixels to 3D points using camera intrinsics
         visible_points_3d = get_3D_points_from_pixels(visible_points_2d, img_depth, cam_intrinsics)
 
         return visible_points_3d, visible_hamer_vertices
-    
+
     @staticmethod
-    def _get_transformation_estimate(visible_points_3d: np.ndarray, 
-                                    visible_hamer_vertices: np.ndarray, 
+    def _get_transformation_estimate(visible_points_3d: np.ndarray,
+                                    visible_hamer_vertices: np.ndarray,
                                     pcd: o3d.geometry.PointCloud) -> Tuple[np.ndarray, o3d.geometry.PointCloud]:
         """
         Estimate transformation to align HaMeR mesh with observed point cloud.
-        
+
         This method uses Iterative Closest Point (ICP) registration to find the
         optimal transformation that aligns the visible parts of the predicted
         hand mesh with the point cloud extracted from depth and segmentation data.
-        
+
         Args:
             visible_points_3d: 3D points from depth image at mesh locations
             visible_hamer_vertices: Corresponding vertices from HaMeR mesh
             pcd: Point cloud from segmentation and depth data
-            
+
         Returns:
             Tuple of (transformation_matrix, aligned_mesh_pointcloud):
                 - transformation_matrix: 4x4 transformation to align mesh with depth
@@ -415,51 +415,51 @@ class HandBaseProcessor(BaseProcessor):
         """
         # Get initial transformation estimate using median translation
         T_0 = HandBaseProcessor._get_initial_transformation_estimate(visible_points_3d, visible_hamer_vertices)
-        
+
         # Create point cloud from visible mesh vertices
         visible_hamer_pcd = get_pcd_from_points(visible_hamer_vertices, colors=np.ones_like(visible_hamer_vertices) * [0, 1, 0])
-        
-        try: 
+
+        try:
             # Apply ICP registration for fine alignment
             aligned_hamer_pcd, T = icp_registration(visible_hamer_pcd, pcd, voxel_size=0.005, init_transform=T_0)
         except Exception as e:
             logger.error(f"ICP registration failed: {e}")
             return T_0, visible_hamer_pcd
-            
+
         return T, aligned_hamer_pcd
-    
+
     @staticmethod
-    def _get_initial_transformation_estimate(visible_points_3d: np.ndarray, 
+    def _get_initial_transformation_estimate(visible_points_3d: np.ndarray,
                                             visible_hamer_vertices: np.ndarray) -> np.ndarray:
         """
         Compute initial transformation estimate for mesh-to-depth alignment.
-        
+
         This method provides a coarse alignment between the HaMeR prediction and
         the depth-based point cloud using median translation. It assumes that
         orientation is approximately correct and only translation correction is needed.
-        
+
         Args:
             visible_points_3d: 3D points from depth image
             visible_hamer_vertices: Corresponding HaMeR mesh vertices
-            
+
         Returns:
             4x4 transformation matrix with estimated translation
         """
         # Calculate median translation between corresponding point sets
         translation = np.nanmedian(visible_points_3d - visible_hamer_vertices, axis=0)
-        
+
         # Create transformation matrix (identity rotation + translation)
         T_0 = np.eye(4)
         if not np.isnan(translation).any():
             T_0[:3, 3] = translation
-            
+
         return T_0
 
 
-class Hand2DProcessor(HandBaseProcessor): 
+class Hand2DProcessor(HandBaseProcessor):
     """
     2D hand pose processor optimized for speed and RGB-only operation.
-    
+
     This processor focuses on extracting 2D hand poses and basic 3D estimates
     without depth sensor integration. It's designed for applications where
     depth sensors are not available.
@@ -467,47 +467,47 @@ class Hand2DProcessor(HandBaseProcessor):
     def __init__(self, args: argparse.Namespace) -> None:
         """
         Initialize 2D hand processor with RGB-only configuration.
-        
+
         Args:
             args: Command line arguments for processor configuration
         """
         super().__init__(args)
 
-    def _process_image_with_hamer(self, img_rgb: np.ndarray, bboxes: np.ndarray, hand_side: str, 
+    def _process_image_with_hamer(self, img_rgb: np.ndarray, bboxes: np.ndarray, hand_side: str,
                                   img_idx: int, view: bool = False) -> Dict[str, Any]:
         """
         Process RGB image with HaMeR for 2D pose estimation.
-        
+
         Args:
             img_rgb: RGB image to process
             bboxes: Hand bounding boxes for pose estimation guidance
             hand_side: "left" or "right" specifying which hand to process
             img_idx: Frame index for debugging and logging
             view: Whether to display debug visualizations
-            
+
         Returns:
             Dictionary containing:
                 - img_hamer: Annotated image with pose visualization
                 - kpts_3d: Estimated 3D keypoints
                 - kpts_2d: 2D keypoint projections in image coordinates
-                
+
         Raises:
             ValueError: If no valid hand pose is detected in the image
         """
         # Configure HaMeR for target hand side
         is_right = np.array([hand_side_dict[str(hand_side)]*True]*len(bboxes))
-        
+
         # Apply HaMeR pose estimation
         hamer_out = self.detector_hamer.detect_hand_keypoints(
-            img_rgb, 
-            hand_side=hand_side, 
-            bboxes=bboxes, 
-            is_right=is_right, 
-            camera_params=self.intrinsics_dict, 
+            img_rgb,
+            hand_side=hand_side,
+            bboxes=bboxes,
+            is_right=is_right,
+            camera_params=self.intrinsics_dict,
             visualize=False
         )
-        
-        if hamer_out is None or not hamer_out.get("success", False):  
+
+        if hamer_out is None or not hamer_out.get("success", False):
             raise ValueError("No hand detected in image")
 
         return {
@@ -515,16 +515,16 @@ class Hand2DProcessor(HandBaseProcessor):
             "kpts_3d": hamer_out["kpts_3d"],
             "kpts_2d": hamer_out['kpts_2d']
         }
-    
-class Hand3DProcessor(HandBaseProcessor): 
+
+class Hand3DProcessor(HandBaseProcessor):
     """
     3D hand pose processor with depth-based refinement capabilities.
-    
+
     This processor provides more accurate 3D hand poses by combining HaMeR
     estimation with depth sensor data and hand segmentation. It uses point cloud
     registration techniques to refine the initial pose estimates, resulting in
     poses that are better aligned with the physical environment.
-    
+
     Processing Enhancements:
     - Mesh generation from HaMeR output for visibility analysis
     - Hand segmentation using SAM2 for accurate depth extraction
@@ -533,61 +533,61 @@ class Hand3DProcessor(HandBaseProcessor):
     def __init__(self, args: argparse.Namespace) -> None:
         """
         Initialize 3D hand processor with depth refinement capabilities.
-        
+
         Args:
             args: Command line arguments containing depth processing configuration
         """
         super().__init__(args)
         self.args = args
-        
+
         # Storage for HaMeR outputs needed for depth alignment
         self.hamer_out_dict: Dict[str, Dict[int, Dict[str, Any]]] = {
             "left": defaultdict(dict),
             "right": defaultdict(dict)
         }
-        
+
         # Enable advanced processing features
         self.process_hand_masks = True
         self.apply_depth_alignment = True
         self.hand_mask_processor = HandSegmentationProcessor(self.args)
 
-    def _process_image_with_hamer(self, img_rgb: np.ndarray, bboxes: np.ndarray, hand_side: str, 
+    def _process_image_with_hamer(self, img_rgb: np.ndarray, bboxes: np.ndarray, hand_side: str,
                                   img_idx: int, view: bool = False) -> Dict[str, Any]:
         """
         Process RGB image with HaMeR optimized for subsequent depth refinement.
-        
+
         This method applies HaMeR pose estimation configured for 3D processing,
         storing intermediate results needed for later depth-based refinement.
-        
+
         Args:
             img_rgb: RGB image to process
             bboxes: Hand bounding boxes for pose estimation guidance
             hand_side: "left" or "right" specifying which hand to process
             img_idx: Frame index for result storage and debugging
             view: Whether to display debug visualizations
-            
+
         Returns:
             Dictionary containing pose estimation results
-            
+
         Raises:
             ValueError: If no valid hand pose is detected in the image
         """
         # Configure HaMeR for target hand side
         is_right = np.array([hand_side_dict[str(hand_side)]*True]*len(bboxes))
-        
+
         # Apply HaMeR with 2D keypoint focus (3D refinement happens later)
         hamer_out = self.detector_hamer.detect_hand_keypoints(
-            img_rgb, 
-            hand_side=hand_side, 
-            bboxes=bboxes, 
-            is_right=is_right, 
+            img_rgb,
+            hand_side=hand_side,
+            bboxes=bboxes,
+            is_right=is_right,
             kpts_2d_only=True,  # Initial processing focuses on 2D
             camera_params=self.intrinsics_dict
         )
-        
-        if hamer_out is None or not hamer_out.get("success", False):  
+
+        if hamer_out is None or not hamer_out.get("success", False):
             raise ValueError("No hand detected in image")
-        
+
         # Store HaMeR output for later depth alignment processing
         self.hamer_out_dict[hand_side][img_idx] = hamer_out
 
@@ -596,22 +596,22 @@ class Hand3DProcessor(HandBaseProcessor):
             "kpts_3d": hamer_out["kpts_3d"],
             "kpts_2d": hamer_out['kpts_2d']
         }
-    
-    def _process_all_frames_depth_alignment(self, imgs_rgb: np.ndarray, hand_detections: np.ndarray, 
+
+    def _process_all_frames_depth_alignment(self, imgs_rgb: np.ndarray, hand_detections: np.ndarray,
                                     hand_side: str, sequence: Optional[HandSequence] = None) -> HandSequence:
         """
         Apply depth-based refinement to all frames in the sequence.
-        
+
         This method performs the depth alignment stage of processing, using
         segmentation masks and depth data to refine the initial HaMeR pose
         estimates for improved 3D accuracy.
-        
+
         Args:
             imgs_rgb: RGB video frames for reference
             hand_detections: Boolean flags indicating frames with valid detections
             hand_side: "left" or "right" specifying which hand to process
             sequence: HandSequence containing initial pose estimates to refine
-            
+
         Returns:
             HandSequence with refined 3D poses aligned to depth data
         """
@@ -625,11 +625,11 @@ class Hand3DProcessor(HandBaseProcessor):
             sequence.modify_frame(img_idx, frame_data)
 
         return sequence
-    
+
     def _depth_alignment(self, img_idx: int, hand_side: str, img_rgb: np.ndarray) -> np.ndarray:
         """
         Perform depth-based pose refinement for a single frame.
-        
+
         Algorithm Steps:
         1. Extract depth image and segmentation mask for the frame
         2. Obtain 3D hand mesh from HaMeR output
@@ -637,12 +637,12 @@ class Hand3DProcessor(HandBaseProcessor):
         4. Identify visible mesh vertices through ray casting
         5. Apply ICP registration between mesh and point cloud
         6. Transform original keypoints using computed alignment
-        
+
         Args:
             img_idx: Index of the frame to process
             hand_side: "left" or "right" specifying which hand to process
             img_rgb: RGB image for reference (used in point cloud generation)
-            
+
         Returns:
             Refined 3D keypoint positions aligned with depth data
         """
@@ -650,7 +650,7 @@ class Hand3DProcessor(HandBaseProcessor):
         img_depth = self.imgs_depth[img_idx]
         mask = self.left_masks[img_idx] if hand_side == "left" else self.right_masks[img_idx]
         hamer_out = self.hamer_out_dict[hand_side][img_idx]
-        
+
         # Create 3D hand mesh from HaMeR pose estimate
         mesh = self._create_hand_mesh(hamer_out)
 
@@ -659,13 +659,13 @@ class Hand3DProcessor(HandBaseProcessor):
 
         # Identify visible mesh vertices and corresponding depth points
         visible_points_3d, visible_hamer_vertices = self._get_visible_pts_from_hamer(
-            self.detector_hamer, 
-            hamer_out, 
-            mesh, 
-            img_depth, 
+            self.detector_hamer,
+            hamer_out,
+            mesh,
+            img_depth,
             self.intrinsics_dict
         )
-        
+
         # Compute optimal transformation using ICP registration
         T, _ = self._get_transformation_estimate(visible_points_3d, visible_hamer_vertices, pcd)
 
