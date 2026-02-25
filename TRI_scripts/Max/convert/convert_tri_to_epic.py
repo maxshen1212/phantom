@@ -144,7 +144,7 @@ from scipy.spatial.transform import Rotation
 # PATH SETUP: Add TRI_scripts to Python path for protobuf imports
 # ============================================================================
 # Kyle's directory contains tracker_pb2.py (protobuf definitions for TRI data)
-tri_scripts_path = "/data/maxshen/TRI_scripts/Kyle"
+tri_scripts_path = "/data/maxshen/phantom/TRI_scripts/Kyle"
 if tri_scripts_path not in sys.path:
     sys.path.insert(0, tri_scripts_path)  # Prepend to ensure priority
 

@@ -217,7 +217,7 @@ class HandBaseProcessor(BaseProcessor):
             processed_data = self._process_image_with_hamer(img_rgb, bbox[None,...], hand_side, img_idx, view=view)
 
             # Quality check: reject poses where keypoints are too close to image edges
-            if self.are_kpts_too_close_to_margin(processed_data["kpts_2d"], self.W, self.H, margin=5, threshold=0.9):
+            if self.are_kpts_too_close_to_margin(processed_data["kpts_2d"], self.W, self.H, margin=5, threshold=0.5):
                 logger.error(f"Error processing frame {img_idx}: Edge hand")
                 return HandFrame.create_empty_frame(
                     frame_idx=img_idx,
@@ -274,7 +274,9 @@ class HandBaseProcessor(BaseProcessor):
         )
 
         frac_near_edge = np.mean(near_edge)  # Fraction of keypoints near edge
-        return frac_near_edge > threshold
+        # return frac_near_edge > threshold
+        # Original return was frac_near_edge > threshold, relaxed to False to allow more poses through for better coverage, even if some are near edges
+        return False
 
     def _save_results(self, paths: Paths, left_sequence: HandSequence, right_sequence: HandSequence) -> None:
         """

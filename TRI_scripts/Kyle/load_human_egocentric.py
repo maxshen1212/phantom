@@ -99,10 +99,9 @@ def transform_point_to_camera_frame_xyz(
         point_world: 3D position in world frame (3,) array
         device_extrinsics: 4x4 world_T_device (device pose in world)
         camera_extrinsics: 4x4 device_T_camera (camera pose relative to device)
-        K: 3x3 camera intrinsics
 
     Returns:
-        [u, v] pixel coordinates or None if behind camera
+        [x, y, z] coordinates in camera frame
     """
     # The camera_extrinsics has translation in bottom row, so transpose it
     device_T_camera = camera_extrinsics.T
@@ -217,7 +216,9 @@ if __name__ == "__main__":
 
     initial_frame = deepcopy(video_frames[0])
     initial_frame = np.flip(initial_frame, axis=-1)
-    initial_frame = np.array(initial_frame) # For some reason you have to do this after np.flip to avoid a cv2 error
+    initial_frame = np.array(
+        initial_frame
+    )  # For some reason you have to do this after np.flip to avoid a cv2 error
     intrinsics_t0 = episode["camera_intrinsics"][0]
     extrinsics_t0 = episode["camera_extrinsics"][0]
     pose_snapshot_t0 = pose_snapshots[0]
@@ -225,8 +226,12 @@ if __name__ == "__main__":
     new_frames = []
     for i, frame in enumerate(video_frames):
         # frame = cv2.resize(frame, (1920, 1080))
-        frame = np.flip(frame, axis=-1) # This is here because CV2 loads images in BGR format instead of RGB format
-        frame = np.array(frame) # For some reason you have to do this after np.flip to avoid a cv2 error
+        frame = np.flip(
+            frame, axis=-1
+        )  # This is here because CV2 loads images in BGR format instead of RGB format
+        frame = np.array(
+            frame
+        )  # For some reason you have to do this after np.flip to avoid a cv2 error
 
         # imageio.imwrite("frame.png", frame))
         pose_snapshot = pose_snapshots[i]
@@ -244,61 +249,113 @@ if __name__ == "__main__":
                 continue
 
             response = pose_snapshot[handside]["response"]
+            # world_T_anchor: pose of the hand root (anchor) in world frame
+
             anchor_transform = response.hand.anchor_transform
-            print(f"handside: {handside}, anchor_transform: {anchor_transform}")
+            # Convert anchor transform to SE(3) matrix
             anchor_transform_se3 = parse_to_se3(anchor_transform)
-            print(f"anchor_transform_se3: {anchor_transform_se3}")
-    #         index_finger_knuckle = response.hand.hand_skeleton.index_finger_knuckle
-    #         index_finger_knuckle_se3 = parse_to_se3(index_finger_knuckle)
+            # anchor_T_knuckle: knuckle pose expressed in the anchor (hand root) frame
 
-    #         knuckle_se3 =  anchor_transform_se3 @ index_finger_knuckle_se3
+            index_finger_knuckle = (
+                response.hand.hand_skeleton.index_finger_knuckle
+            )
+            # Convert finger knuckle pose to SE(3) matrix
+            index_finger_knuckle_se3 = parse_to_se3(index_finger_knuckle)
 
-    #         device_extrinsics = parse_to_se3(response.device)
-    #         anchor_pixel_coords = project_point_to_image_corrected(anchor_transform_se3, device_extrinsics, extrinsics, intrinsics).astype(int)
-    #         knuckle_pixel_coords = project_point_to_image_corrected(knuckle_se3, device_extrinsics, extrinsics, intrinsics).astype(int)
+            # world_T_knuckle = world_T_anchor @ anchor_T_knuckle
+            knuckle_se3 = anchor_transform_se3 @ index_finger_knuckle_se3
 
-    #         color = RED if handside == "left" else BLUE
-    #         frame = draw_points_and_line(frame, anchor_pixel_coords, knuckle_pixel_coords, circle_radius=5, circle_color=color, line_color=color, thickness=2)
-    #         frame = cv2.putText(frame, handside, knuckle_pixel_coords, cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+            # world_T_device: pose of the Vision Pro device in world frame
+            device_extrinsics = parse_to_se3(response.device)
 
-    #         # Resize to whatever size you need for your data processing (note: resizing to small sizes can make the annotations disappear)
-    #         # frame = cv2.resize(frame, (960, 540))
+            # Project world_T_anchor to image:
+            # world -> device -> camera -> image plane
+            anchor_pixel_coords = project_point_to_image_corrected(
+                anchor_transform_se3, device_extrinsics, extrinsics, intrinsics
+            ).astype(int)
 
-    #         new_frames.append(frame)
+            # Project world_T_knuckle to image:
+            # world -> device -> camera -> image plane
+            knuckle_pixel_coords = project_point_to_image_corrected(
+                knuckle_se3, device_extrinsics, extrinsics, intrinsics
+            ).astype(int)
+            # @Max check to see if 0 <= knuckle_pixel_coords[0] >= frame.shape[1] and 0 <= knuckle_pixel_coords[1] >= frame.shape[0]
 
-    #         # @Zeqing this part shows how to project the gripper positions into the xyz coordinate frame of the camera at t=0
-    #         response_t0 = pose_snapshot_t0[handside]["response"]
-    #         device_extrinsics_t0 = parse_to_se3(response_t0.device)
-    #         knuckle_xyz_t0 = transform_point_to_camera_frame_xyz(knuckle_se3, device_extrinsics_t0, extrinsics_t0)
+            color = RED if handside == "left" else BLUE
+            frame = draw_points_and_line(
+                frame,
+                anchor_pixel_coords,
+                knuckle_pixel_coords,
+                circle_radius=5,
+                circle_color=color,
+                line_color=color,
+                thickness=2,
+            )
+            frame = cv2.putText(
+                frame,
+                handside,
+                knuckle_pixel_coords,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                color,
+                2,
+            )
 
-    #         # Project to the 2D camera plane at t=0 for visualization
-    #         knuckle_pixel_coords_t0 = to_camera_plane(knuckle_xyz_t0, intrinsics_t0).astype(int)
-    #         initial_frame = cv2.circle(initial_frame, knuckle_pixel_coords_t0, 5, color, -1)
+            # Resize to whatever size you need for your data processing (note: resizing to small sizes can make the annotations disappear)
+            # frame = cv2.resize(frame, (960, 540))
 
-    #         # Also visualize the xyz positions not transformed into the first camera's coordinate frame (but rather in the coordinate
-    #         # frame of the camera at time t) to compare the difference.
-    #         knuckle_xyz_t = transform_point_to_camera_frame_xyz(knuckle_se3, device_extrinsics, extrinsics)
-    #         knuckle_pixel_coords_t = to_camera_plane(knuckle_xyz_t, intrinsics).astype(int)
-    #         assert np.array_equal(knuckle_pixel_coords, knuckle_pixel_coords_t) # This two should always be equal, since it's equivalent logic to get here
-    #         initial_frame = cv2.circle(initial_frame, knuckle_pixel_coords_t, 5, WHITE, -1)
+            new_frames.append(frame)
 
-    #     # cv2.imshow("Left Main Camera", frame)
-    #     # cv2.waitKey(1)
+            # This shows how to convert the 3D hand/gripper positions from the coordinate frame of the camera at time t to the coordinate frame of the camera at t=0.
+            # @Zeqing this part shows how to project the gripper positions into the xyz coordinate frame of the camera at t=0
+            response_t0 = pose_snapshot_t0[handside]["response"]
+            device_extrinsics_t0 = parse_to_se3(response_t0.device)
+            knuckle_xyz_t0 = transform_point_to_camera_frame_xyz(
+                knuckle_se3, device_extrinsics_t0, extrinsics_t0
+            )
 
-    # FPS = 20
-    # video_file = os.path.join(episode_dir, "main_camera_annotated.mp4")
-    # imageio.mimsave(video_file, new_frames, fps=FPS, macro_block_size=1)
-    # print(f"Saved episode images to {video_file}.")
+            # Project to the 2D camera plane at t=0 for visualization
+            knuckle_pixel_coords_t0 = to_camera_plane(
+                knuckle_xyz_t0, intrinsics_t0
+            ).astype(int)
+            initial_frame = cv2.circle(
+                initial_frame, knuckle_pixel_coords_t0, 5, color, -1
+            )
 
-    # initial_frame_file = os.path.join(episode_dir, "initial_frame_annotated.png")
-    # imageio.imsave(initial_frame_file, initial_frame)
-    # print(f"Saved initial frame to {initial_frame_file}.")
+            # Also visualize the xyz positions not transformed into the first camera's coordinate frame (but rather in the coordinate
+            # frame of the camera at time t) to compare the difference.
+            knuckle_xyz_t = transform_point_to_camera_frame_xyz(
+                knuckle_se3, device_extrinsics, extrinsics
+            )
+            knuckle_pixel_coords_t = to_camera_plane(
+                knuckle_xyz_t, intrinsics
+            ).astype(int)
+            assert np.array_equal(
+                knuckle_pixel_coords, knuckle_pixel_coords_t
+            )  # This two should always be equal, since it's equivalent logic to get here
+            initial_frame = cv2.circle(
+                initial_frame, knuckle_pixel_coords_t, 5, WHITE, -1
+            )
+
+        # cv2.imshow("Left Main Camera", frame)
+        # cv2.waitKey(1)
+
+    FPS = 20
+    video_file = os.path.join(episode_dir, "main_camera_annotated.mp4")
+    imageio.mimsave(video_file, new_frames, fps=FPS, macro_block_size=1)
+    print(f"Saved episode images to {video_file}.")
+
+    initial_frame_file = os.path.join(
+        episode_dir, "initial_frame_annotated.png"
+    )
+    imageio.imsave(initial_frame_file, initial_frame)
+    print(f"Saved initial frame to {initial_frame_file}.")
 
 
 """
 Example usage:
 
 python3 -u load_human_egocentric.py \
---episode-dir "/data/maxshen/LBM_human_egocentric/egoPutKiwiInCenterOfTable/2025-11-13_12-46-27/episode_46 (success)"
+--episode-dir "/data/maxshen/Video_data/LBM_human_egocentric/egoPutKiwiInCenterOfTable/2025-11-13_12-46-27/episode_46 (success)"
 
 """
