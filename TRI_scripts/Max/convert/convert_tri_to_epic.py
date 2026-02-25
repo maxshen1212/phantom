@@ -137,7 +137,7 @@ import json
 import numpy as np
 import sys
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from scipy.spatial.transform import Rotation
 
 # ============================================================================
@@ -180,11 +180,6 @@ DEFAULT_IMG_HEIGHT = 1080  # Height in pixels
 # - Applied after computing min/max 2D joint coordinates
 # - Example: if bbox width is 100px, add 10px padding on left and right
 BBOX_PADDING = 0.1  # 10% padding factor
-
-# Invalid depth marker (currently unused)
-# - Placeholder for marking invalid depth values in future implementations
-# - Could be used to filter out points behind the camera (z < 0)
-INVALID_DEPTH_MARKER = -10000
 
 # Target resolution for video downsampling
 # - E2FGVI inpainting model cannot handle 1920x1080 in EPIC mode (GPU OOM)
@@ -253,69 +248,6 @@ def parse_to_se3(transform) -> np.ndarray:
 
     # Bottom row [0 0 0 1] is already set by np.eye(4)
     return se3  # Shape: (4, 4), represents frame transformation
-
-
-def save_camera_params_to_json(
-    intrinsics: np.ndarray,
-    extrinsics: np.ndarray,
-    output_dir: str,
-    episode_name: str = "human",
-    output_filename: str = "camera_intrinsics_human.json",
-) -> None:
-    """
-    Save camera intrinsics and extrinsics to JSON file in project format.
-
-    Args:
-        intrinsics: (3, 3) camera intrinsic matrix [[fx, 0, cx], [0, fy, cy], [0, 0, 1]]
-        extrinsics: (4, 4) camera extrinsic matrix (from first frame)
-        output_dir: Output directory for JSON file
-        episode_name: Episode identifier
-        output_filename: Output filename (default: camera_intrinsics_human.json)
-    """
-    # Extract intrinsic parameters from 3x3 matrix
-    fx = float(intrinsics[0, 0])
-    fy = float(intrinsics[1, 1])
-    cx = float(intrinsics[0, 2])
-    cy = float(intrinsics[1, 2])
-
-    # Calculate field of view (assuming Vision Pro dimensions: 1920x1080)
-    img_width = 1920
-    img_height = 1080
-    h_fov = 2 * np.arctan(img_width / (2 * fx)) * 180 / np.pi
-    v_fov = 2 * np.arctan(img_height / (2 * fy)) * 180 / np.pi
-    d_fov = (
-        2
-        * np.arctan(np.sqrt(img_width**2 + img_height**2) / (2 * fx))
-        * 180
-        / np.pi
-    )
-
-    # Build camera params in Phantom format: {"left": {...}, "right": {...}}
-    # Phantom's get_intrinsics_from_json() expects this structure
-    cam_entry = {
-        "fx": fx,
-        "fy": fy,
-        "cx": cx,
-        "cy": cy,
-        "disto": [0.0] * 12,  # No distortion parameters
-        "v_fov": float(v_fov),
-        "h_fov": float(h_fov),
-        "d_fov": float(d_fov),
-    }
-    camera_params = {
-        "left": cam_entry,
-        "right": dict(cam_entry),  # Same intrinsics for both sides
-    }
-
-    # Create output directory if needed
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Save to JSON
-    output_path = os.path.join(output_dir, output_filename)
-    with open(output_path, "w") as f:
-        json.dump(camera_params, f, indent=4)
-
-    print(f"  Camera params saved: {output_path}")
 
 
 def extract_hand_joints_3d(skeleton_response) -> np.ndarray:
@@ -438,32 +370,7 @@ def get_device_pose_from_skeleton(skeleton_response) -> np.ndarray:
     Returns:
         4x4 transformation matrix (world_T_device) representing device pose in world frame
     """
-    # Extract device (Vision Pro headset) information from protobuf
-    device = skeleton_response.device
-    trans = device.translation  # Device position in world (x, y, z) meters
-    rot = device.rotation  # Device orientation as quaternion (x, y, z, w)
-
-    # Build SE(3) transformation matrix for device pose
-    # - This matrix transforms points from device frame to world frame
-    # - Format: world_T_device ("world T device" = world FROM device)
-    device_pose = np.eye(4)  # Initialize as 4x4 identity matrix
-
-    # Set rotation part (top-left 3x3 submatrix)
-    # - Convert quaternion [qx, qy, qz, qw] to 3x3 rotation matrix
-    # - Rotation matrix R: transforms device-frame vectors to world-frame
-    device_pose[:3, :3] = Rotation.from_quat(
-        [rot.x, rot.y, rot.z, rot.w]  # Quaternion in [qx, qy, qz, qw] format
-    ).as_matrix()
-
-    # Set translation part (top-right column vector)
-    # - Position of device origin in world coordinates (meters)
-    # - [trans.x, trans.y, trans.z]: where the device is located in world
-    device_pose[:3, 3] = [trans.x, trans.y, trans.z]
-
-    # Result: world_T_device (4x4 SE(3) matrix)
-    # - Transforms points: p_world = world_T_device @ p_device
-    # - Example: if device is at [1, 2, 3] in world, translation column is [1, 2, 3]
-    return device_pose  # Shape: (4, 4)
+    return parse_to_se3(skeleton_response.device)
 
 
 def project_3d_to_2d(
@@ -750,26 +657,10 @@ def compute_bbox_from_2d_points(
 
     # =========================================================================
     # STEP 4: Validate bounding box
-    # =========================================================================
-    # Check for invalid cases:
-    # 1. Inverted dimensions: left >= right or top >= bottom
-    #    - This can happen if all points are identical or numerical errors
-    # 2. Out of bounds: any coordinate outside [0, 1] range
-    #    - Normalized coords must be within image bounds
-    #
-    # If any validation fails, return None (invalid bbox)
-
-    is_valid = (
-        left < right  # Width must be positive
-        and top < bottom  # Height must be positive
-        and 0 <= left <= 1  # Left edge within bounds
-        and 0 <= right <= 1  # Right edge within bounds
-        and 0 <= top <= 1  # Top edge within bounds
-        and 0 <= bottom <= 1  # Bottom edge within bounds
-    )
-
-    if not is_valid:
-        return None  # Invalid bbox, return None
+    # After clamping, coordinates are guaranteed to be in [0, 1], so only
+    # check that the bbox has positive dimensions (left < right, top < bottom).
+    if left >= right or top >= bottom:
+        return None
 
     # Create and return EPIC BBox object
     # - BBox format: (left, top, right, bottom) all in [0, 1]
@@ -928,7 +819,7 @@ def process_tri_episode(
     output_dir: str,
     img_width: int = DEFAULT_IMG_WIDTH,
     img_height: int = DEFAULT_IMG_HEIGHT,
-) -> Dict[str, List[HandDetection]]:
+) -> Tuple[Dict[str, List[HandDetection]], np.ndarray, np.ndarray]:
     """
     Convert TRI episode.pkl (3D hand skeletal data) to EPIC hand_det.pkl (2D bboxes).
 
@@ -945,7 +836,7 @@ def process_tri_episode(
         img_height: Image height (default 1080)
 
     Returns:
-        Dictionary mapping frame indices (as strings) to list of hand detections
+        Tuple of (hand_det_data, first_frame_intrinsics, first_frame_extrinsics)
     """
     print(f"Loading: {episode_path}")
 
@@ -1106,8 +997,7 @@ def process_tri_episode(
     print(f"  Right hand detected: {frames_with_right} frames")
 
     # Count empty frames (no hands detected)
-    # Note: A frame with only one hand is not considered empty
-    empty_frames = len(hand_det_data) - max(frames_with_left, frames_with_right)
+    empty_frames = sum(1 for dets in hand_det_data.values() if len(dets) == 0)
     print(f"  Empty frames (no hands): {empty_frames} frames")
 
     # Print failure statistics if any failures occurred
@@ -1152,9 +1042,7 @@ def process_tri_episode(
 
     print(f"\nSaved: {output_path}")
 
-    # Return the hand detection dictionary (also saved to file)
-    # - Can be used for further processing or validation
-    return hand_det_data  # Dict[str, List[HandDetection]]
+    return hand_det_data, first_frame_intrinsics, first_frame_extrinsics
 
 
 def validate_output(output_path: str) -> bool:
@@ -1539,20 +1427,27 @@ def save_extrinsics_to_json(
         print(f"  => {dst}")
 
 
+def _sort_key_for_dir(d: str):
+    try:
+        return int(d.split("_", 1)[1].split()[0])
+    except (IndexError, ValueError):
+        return d
+
+
 def find_all_episodes(base_dir: str) -> List[str]:
     """
     Recursively find all episode.pkl files under base_dir.
 
     Args:
-        base_dir: Root directory to search (e.g. /data/maxshen/Data/LBM_human_egocentric)
+        base_dir: Root directory to search (e.g. /data/maxshen/Video_data/LBM_human_egocentric)
 
     Returns:
         Sorted list of absolute paths to episode.pkl files
     """
     episode_paths = []
     for root, dirs, files in os.walk(base_dir):
-        # Sort dirs in-place so os.walk traverses them in alphabetical order
-        dirs.sort()
+        # Sort dirs in-place so os.walk traverses them in order
+        dirs.sort(key=_sort_key_for_dir)
         for fname in sorted(files):
             if fname == "episode.pkl":
                 episode_paths.append(os.path.join(root, fname))
@@ -1586,40 +1481,37 @@ def process_single_episode(
     # STEP 1: Generate hand_det.pkl
     # ------------------------------------------------------------------
     try:
-        process_tri_episode(episode_path, output_dir)
+        _, first_intrinsics, first_extrinsics = process_tri_episode(
+            episode_path, output_dir
+        )
     except Exception as e:
-        print(f"\n  ERROR during hand detection conversion: {e}")
+        print(f"\n  ERROR during Generate hand_det.pkl: {e}")
         import traceback
+
         traceback.print_exc()
         return False
 
     # ------------------------------------------------------------------
-    # STEP 2: Downsample video to 456x256
+    # STEP 2: Downsample video
     # ------------------------------------------------------------------
     if os.path.exists(video_path):
-        downsample_video(video_path, output_dir, TARGET_WIDTH, TARGET_HEIGHT)
+        try:
+            downsample_video(
+                video_path, output_dir, TARGET_WIDTH, TARGET_HEIGHT
+            )
+        except Exception as e:
+            print(f"\n  ERROR during Downsample video: {e}")
+            import traceback
+
+            traceback.print_exc()
+            return False
     else:
         print(f"  Warning: Video not found at {video_path}")
-        existing = os.path.join(output_dir, "video_L.mp4")
-        if os.path.exists(existing):
-            import shutil
-            tmp = existing + ".tmp.mp4"
-            shutil.move(existing, tmp)
-            downsample_video(tmp, output_dir, TARGET_WIDTH, TARGET_HEIGHT)
-            os.remove(tmp)
-        else:
-            print(f"  Error: No video source found.")
 
     # ------------------------------------------------------------------
     # STEP 3 (optional): Save camera intrinsics / extrinsics JSONs
     # ------------------------------------------------------------------
     if save_camera_params:
-        with gzip.open(episode_path, "rb") as f:
-            ep = pickle.load(f)
-
-        first_intrinsics = ep["camera_intrinsics"][0]
-        first_extrinsics = ep["camera_extrinsics"][0]
-
         save_scaled_intrinsics(
             first_intrinsics,
             DEFAULT_IMG_WIDTH,
@@ -1658,7 +1550,7 @@ def main():
     # CONFIGURATION
     # =========================================================================
     # Root directory that contains all TRI episodes
-    INPUT_BASE_DIR = "/data/maxshen/Data/LBM_human_egocentric"
+    INPUT_BASE_DIR = "/data/maxshen/Video_data/LBM_human_egocentric/egoPutKiwiInCenterOfTable/2025-11-13_12-46-27"
 
     # Root output directory; each episode gets a numbered sub-directory
     OUTPUT_BASE_DIR = "/data/maxshen/phantom/data/raw/tri"
@@ -1688,7 +1580,7 @@ def main():
     results = {"success": 0, "skipped": 0, "failed": 0}
     save_camera_params_done = False  # Only save camera JSONs once
 
-    for idx, episode_path in enumerate(episode_paths):
+    for idx, episode_path in enumerate(episode_paths[:1]):
         output_dir = os.path.join(OUTPUT_BASE_DIR, str(idx))
 
         print("=" * 60)
@@ -1706,7 +1598,7 @@ def main():
             continue
 
         # ------------------------------------------------------------------
-        # Validate input exists
+        # Fail check: Validate input exists
         # ------------------------------------------------------------------
         if not os.path.exists(episode_path):
             print(f"  ERROR: episode.pkl not found, skipping.")
@@ -1735,7 +1627,7 @@ def main():
     # SUMMARY
     # =========================================================================
     print("\n" + "=" * 60)
-    print("Batch conversion complete!")
+    print("Conversion complete!")
     print(f"  Succeeded : {results['success']}")
     print(f"  Skipped   : {results['skipped']}")
     print(f"  Failed    : {results['failed']}")
