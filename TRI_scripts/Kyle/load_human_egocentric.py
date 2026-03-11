@@ -93,7 +93,7 @@ def transform_point_to_camera_frame_xyz(
     point_T, device_extrinsics, camera_extrinsics
 ):
     """
-    Project a 3D point in world coordinates to camera image coordinates.
+    Project a 3D point in world coordinates to camera frame coordinates.
 
     Args:
         point_world: 3D position in world frame (3,) array
@@ -249,8 +249,8 @@ if __name__ == "__main__":
                 continue
 
             response = pose_snapshot[handside]["response"]
+            
             # world_T_anchor: pose of the hand root (anchor) in world frame
-
             anchor_transform = response.hand.anchor_transform
             # Convert anchor transform to SE(3) matrix
             anchor_transform_se3 = parse_to_se3(anchor_transform)
