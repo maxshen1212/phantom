@@ -8,7 +8,7 @@ from collections import Counter
 sys.path.append("/data/maxshen/TRI_scripts")
 
 # Read TRI episode.pkl (gzip compressed)
-pkl_path = "/data/maxshen/Data/LBM_human_egocentric/egoPutKiwiInCenterOfTable/2025-11-13_12-46-27/episode_4 (success)/episode.pkl"
+pkl_path = "/data/maxshen/Video_data/LBM_human_egocentric/egoPutKiwiInCenterOfTable/2025-11-13_12-46-27/episode_4 (success)/episode.pkl"
 
 print("=" * 80)
 print(f"Reading file: {pkl_path}")
@@ -94,6 +94,16 @@ if isinstance(data, dict):
     if "camera_extrinsics" in data:
         print(f"\ncamera_extrinsics (first frame):")
         print(data["camera_extrinsics"][0])
+        # all_same = True
+
+        # for i in range(1, len(data["camera_extrinsics"])):
+        #     if not np.allclose(data["camera_extrinsics"][0], data["camera_extrinsics"][i]):
+        #         print(f"Difference found at index {i}")
+        #         all_same = False
+        #         break
+
+        # if all_same:
+        #     print("All extrinsics are identical.")
 
     # Display detailed content of pose_snapshots
     if "pose_snapshots" in data:

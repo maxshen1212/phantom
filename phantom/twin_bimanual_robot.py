@@ -12,7 +12,7 @@ import re
 import cv2
 import pdb
 import matplotlib.pyplot as plt
-import numpy as np 
+import numpy as np
 from scipy.spatial.transform import Rotation
 from dataclasses import dataclass
 from typing import Tuple, Union, Any
@@ -27,7 +27,7 @@ import robomimic.utils.obs_utils as ObsUtils # type: ignore
 class MujocoCameraParams:
     """
     Camera parameters for MuJoCo simulation.
-    
+
     Attributes:
         name: Camera name identifier
         pos: 3D position of camera in world coordinates
@@ -54,20 +54,20 @@ HAND_EE_COLOR = [0, 0, 1, 1]  # Blue for hand end-effector
 
 # Transformation matrix for Epic Kitchen setup - converts from base frame to robot frame
 BASE_T_1 = np.array([[0.0, -1.0,  0.0,  0.0],
-                    [ 0.5,  0.0,  0.866,  0.2],
+                    [ 0.5,  0.0,  0.866,  -0.1],
                     [-0.866,  0.0,  0.5,  1.50],
                     [ 0.0,  0.0,  0.0,  1.0]])
 
 def convert_real_camera_ori_to_mujoco(camera_ori_matrix: np.ndarray) -> np.ndarray:
     """
     Convert camera orientation from real world to MuJoCo XML format.
-    
+
     MuJoCo uses a different coordinate system convention, so we need to
     flip the Y and Z axes of the rotation matrix before converting to quaternion.
-    
+
     Args:
         camera_ori_matrix: 3x3 rotation matrix in real-world coordinates
-        
+
     Returns:
         Camera orientation as quaternion in MuJoCo format (w, x, y, z)
     """
@@ -79,7 +79,7 @@ def convert_real_camera_ori_to_mujoco(camera_ori_matrix: np.ndarray) -> np.ndarr
 class TwinBimanualRobot:
     """
     Virtual twin of a bimanual robot system in MuJoCo simulation.
-    
+
     This class creates a simulated bimanual robot that can be controlled via
     end-effector poses or joint positions. It provides functionality for:
     - Robot pose control (OSC or joint-level)
@@ -87,14 +87,14 @@ class TwinBimanualRobot:
     - Robot and gripper mask generation
     - Observation history management
     """
-    
+
     def __init__(self, robot_name: str, gripper_name: str, bimanual_setup: str,
                  camera_params: MujocoCameraParams, camera_height: int, camera_width: int,
                  render: bool, n_steps_short: int, n_steps_long: int, square: bool = False,
-                 debug_cameras: list[str] = [], epic: bool = False, joint_controller: bool = False): 
+                 debug_cameras: list[str] = [], epic: bool = False, joint_controller: bool = False):
         """
         Initialize the bimanual robot twin.
-        
+
         Args:
             robot_name: Type of robot (e.g., "Kinova3")
             gripper_name: Type of gripper (e.g., "Robotiq85")
@@ -136,7 +136,7 @@ class TwinBimanualRobot:
         )
         ObsUtils.initialize_obs_utils_with_obs_specs(
             obs_modality_specs=obs_spec)
-                        
+
         # Configure robosuite environment options
         options: dict[str, Union[str, list[str], dict[str, Any], bool, int, np.ndarray]] = {}
         options["env_name"] = "PhantomBimanual"
@@ -146,13 +146,13 @@ class TwinBimanualRobot:
             options["gripper_types"] = [f"{self.gripper_name}GripperRealKinova", f"{self.gripper_name}GripperRealKinova"]
         else:
             options["gripper_types"] = [f"{self.gripper_name}Gripper", f"{self.gripper_name}Gripper"]
-        
+
         # Configure controller (OSC pose control by default)
         controller_config = load_controller_config(default_controller="OSC_POSE")
         controller_config["control_delta"] = False  # Use absolute positioning
         controller_config["uncouple_pos_ori"] = False  # Couple position and orientation
         options["controller_configs"] = controller_config
-        
+
         # Override with joint controller if specified
         if self.joint_controller:
             controller_config = load_controller_config(default_controller="JOINT_POSITION")
@@ -166,14 +166,14 @@ class TwinBimanualRobot:
             controller_config["kp"] = 1000  # Proportional gain
             controller_config["kp_limits"] = [0, 1000]  # Proportional gain limits
             options["controller_configs"] = controller_config
-            
+
         # Camera and observation settings
         options["camera_heights"] = self.camera_height
         options["camera_widths"] = self.camera_width
         options["camera_segmentations"] = "instance"  # Instance segmentation masks
         options["direct_gripper_control"] = True
         options["use_depth_obs"] = True
-        
+
         # Apply Epic Kitchen coordinate transformation if enabled
         if self.epic:
             self.base_T_1 = BASE_T_1
@@ -203,7 +203,7 @@ class TwinBimanualRobot:
         self.reset()
         self.robot_base_pos = np.array([0, 0, self.env.env.robot_base_height+self.env.env.robot_base_offset])
 
- 
+
     def reset(self):
         """Reset environment and clear observation history."""
         self.env.reset()
@@ -217,16 +217,16 @@ class TwinBimanualRobot:
                                 use_base_offset: bool = False) -> np.ndarray:
         """
         Convert end-effector pose to robot action vector.
-        
+
         This method transforms the desired end-effector position and orientation
         into the action format expected by the robot controller.
-        
+
         Args:
             ee_pos: End-effector position as 3D array
             ee_quat_xyzw: End-effector orientation as quaternion (x, y, z, w)
             gripper_action: Gripper action value
             use_base_offset: Whether to add robot base offset to position
-            
+
         Returns:
             Action vector [position(3), rotation(3), gripper(1)]
         """
@@ -234,11 +234,11 @@ class TwinBimanualRobot:
         if ee_pos.ndim > 1:
             ee_pos = ee_pos[-1]
             ee_quat_xyzw = ee_quat_xyzw[-1]
-            
+
         # Add base offset if requested and not in Epic mode
         if use_base_offset and not self.epic:
             ee_pos = ee_pos + self.robot_base_pos
-        
+
         # Apply coordinate transformations based on mode
         if self.epic:
             # Transform position and orientation to Epic Kitchen coordinate frame
@@ -248,9 +248,9 @@ class TwinBimanualRobot:
             # Apply 135-degree Z rotation for standard setup
             rot = Rotation.from_quat(ee_quat_xyzw)
             rot_135deg = Rotation.from_euler('z', 135, degrees=True)
-            new_rot = rot * rot_135deg 
+            new_rot = rot * rot_135deg
             axis_angle = new_rot.as_rotvec()
-            
+
         # Combine into action vector
         action = np.concatenate([ee_pos, axis_angle, [gripper_action]])
 
@@ -259,34 +259,34 @@ class TwinBimanualRobot:
     def _get_initial_obs_history(self, state: dict) -> deque:
         """
         Initialize observation history by repeating the first observation.
-        
+
         This creates a history buffer filled with the initial robot state,
         which is useful for algorithms that require temporal context.
-        
+
         Args:
             state: Initial robot state dictionary
-            
+
         Returns:
             Deque containing repeated initial observations
         """
         obs_history = deque(
-                [self.move_to_target_state(state, init=True)], 
+                [self.move_to_target_state(state, init=True)],
                 maxlen=self.num_frames,
         )
         # Fill remaining slots with copies of the initial observation
         for _ in range(self.num_frames-1):
             obs_history.append(self.move_to_target_state(state))
         return obs_history
-    
+
     def get_obs_history(self, state: dict) -> list:
         """
         Get observation history with specified length.
-        
+
         Maintains a rolling buffer of recent observations for temporal context.
-        
+
         Args:
             state: Current robot state dictionary
-            
+
         Returns:
             List of recent observations (length = self.num_frames)
         """
@@ -297,23 +297,23 @@ class TwinBimanualRobot:
             # Add new observation to history
             self.obs_history.append(self.move_to_target_state(state))
         return list(self.obs_history)
-    
+
     def move_to_target_state(self, state: dict, init=False) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Move robot to target state and collect observation data.
-        
+
         This is the main method for controlling the robot and collecting observations.
         It handles both pose and joint control modes, and collects RGB, depth,
         and segmentation data along with tracking errors.
-        
+
         Args:
             state: Target state containing positions, orientations, and gripper states
             init: Whether this is an initialization step (uses longer movement time)
-            
+
         Returns:
             Dictionary containing observation data:
             - robot_mask: Binary mask showing robot pixels
-            - gripper_mask: Binary mask showing gripper pixels  
+            - gripper_mask: Binary mask showing gripper pixels
             - rgb_img: RGB camera image
             - depth_img: Depth camera image
             - robot_pos: Robot end-effector position
@@ -376,20 +376,20 @@ class TwinBimanualRobot:
             output[f"{cam}_img"] = cam_img
 
         return output
- 
+
     def _convert_handgripper_pos_to_action(self, gripper_pos: float) -> np.ndarray:
         """
         Convert hand gripper position to robot gripper action.
-        
+
         Maps from physical gripper opening distance to robot action values.
         Different gripper types may have different mappings.
-        
+
         Args:
             gripper_pos: Gripper opening distance in meters
-            
+
         Returns:
             Robot gripper action value (0-255 for Robotiq85)
-            
+
         Raises:
             ValueError: If gripper type is not supported
         """
@@ -406,10 +406,10 @@ class TwinBimanualRobot:
     def move_to_pose(self, ee_pos: dict, ee_ori: dict, gripper_action: dict, n_steps: int, q0=None, q1=None) -> dict:
         """
         Execute robot movement to target pose.
-        
+
         Sends action commands to the simulation for the specified number of steps.
         Handles both pose control (OSC) and joint control modes.
-        
+
         Args:
             ee_pos: End-effector positions for both arms {0: pos0, 1: pos1}
             ee_ori: End-effector orientations for both arms {0: ori0, 1: ori1}
@@ -417,7 +417,7 @@ class TwinBimanualRobot:
             n_steps: Number of simulation steps to execute
             q0: Joint positions for arm 0 (only for joint controller)
             q1: Joint positions for arm 1 (only for joint controller)
-            
+
         Returns:
             Final observation dictionary from simulation
         """
@@ -452,14 +452,14 @@ class TwinBimanualRobot:
             if self.render:
                 self.env.render()
         return obs
-    
+
     def get_proprioception(self, obs: dict) -> np.ndarray:
         """
         Get proprioceptive information (robot's internal state).
-        
+
         Args:
             obs: Observation dictionary from simulation
-            
+
         Returns:
             End-effector position of first robot
         """
@@ -469,12 +469,12 @@ class TwinBimanualRobot:
     def get_image(self, obs: dict) -> np.ndarray:
         """
         Extract RGB image from observation.
-        
+
         Handles image format conversion and optional square cropping.
-        
+
         Args:
             obs: Observation dictionary containing image data
-            
+
         Returns:
             RGB image as numpy array (H, W, 3)
         """
@@ -482,21 +482,21 @@ class TwinBimanualRobot:
         img = img.transpose(1, 2, 0)  # Convert from CHW to HWC format
         height = img.shape[0]
         width = img.shape[1]
-        
+
         # Crop to square if requested
         if self.square:
             n_remove = int((width - height)/2)
             img = img[:,n_remove:-n_remove,:]
         return img
-    
+
     def get_camera_image(self, obs: dict, camera_name: str) -> np.ndarray:
         """
         Extract RGB image from specific camera.
-        
+
         Args:
             obs: Observation dictionary containing image data
             camera_name: Name of the camera to extract image from
-            
+
         Returns:
             RGB image as numpy array (H, W, 3)
         """
@@ -504,20 +504,20 @@ class TwinBimanualRobot:
         img = img.transpose(1, 2, 0)  # Convert from CHW to HWC format
         height = img.shape[0]
         width = img.shape[1]
-        
+
         # Crop to square if requested
         if self.square:
             n_remove = int((width - height)/2)
             img = img[:,n_remove:-n_remove,:]
         return img
-    
+
     def get_seg_image(self, obs: dict) -> np.ndarray:
         """
         Extract instance segmentation image.
-        
+
         Args:
             obs: Observation dictionary containing segmentation data
-            
+
         Returns:
             Segmentation image as uint8 array where each pixel value
             represents a different object instance ID
@@ -525,24 +525,24 @@ class TwinBimanualRobot:
         img = obs[f"{self.camera_name}_segmentation_instance"]
         height = img.shape[0]
         width = img.shape[1]
-        
+
         # Crop to square if requested
         if self.square:
             n_remove = int((width - height)/2)
-            img = img[:,n_remove:-n_remove,:]  
+            img = img[:,n_remove:-n_remove,:]
             img = img.astype(np.uint8)
         return img
 
     def get_depth_image(self, obs: dict) -> np.ndarray:
         """
         Extract and process depth image.
-        
+
         Converts raw depth buffer to real-world depth values using
         robosuite's depth processing utilities.
-        
+
         Args:
             obs: Observation dictionary containing depth data
-            
+
         Returns:
             Depth image as numpy array where values represent
             distance in meters
@@ -551,23 +551,23 @@ class TwinBimanualRobot:
         img = get_real_depth_map(sim=self.env.env.sim, depth_map=img)
         height = img.shape[0]
         width = img.shape[1]
-        
+
         # Crop to square if requested
         if self.square:
             n_remove = int((width - height)/2)
             img = img[:,n_remove:-n_remove,:]
         return img
-    
+
     def get_robot_mask(self, obs: dict) -> np.ndarray:
         """
         Generate binary mask for robot pixels.
-        
+
         Uses instance segmentation to identify which pixels belong to
         the robot arms (instance IDs 1 and 4).
-        
+
         Args:
             obs: Observation dictionary containing segmentation data
-            
+
         Returns:
             Binary mask where 1 indicates robot pixels, 0 otherwise
         """
@@ -576,17 +576,17 @@ class TwinBimanualRobot:
         mask[seg_img == 1] = 1  # First robot arm
         mask[seg_img == 4] = 1  # Second robot arm
         return mask
-    
+
     def get_gripper_mask(self, obs: dict) -> np.ndarray:
         """
         Generate binary mask for gripper pixels.
-        
+
         Uses instance segmentation to identify which pixels belong to
         the robot grippers (instance IDs 3 and 6).
-        
+
         Args:
             obs: Observation dictionary containing segmentation data
-            
+
         Returns:
             Binary mask where 1 indicates gripper pixels, 0 otherwise
         """
