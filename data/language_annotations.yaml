@@ -1,0 +1,13 @@
+language_dict:
+  # This is used to populate language instruction for skills with no hints
+  # at all. I.e. datagram from oxe with no "task_description" in their
+  # metadata file.
+  PutKiwiInCenterOfTable:
+    original:
+    - move the kiwi mid-way between the arms
+    randomized:
+    - position the kiwi halfway between the arms
+    - place the kiwi centrally between the arms
+    - shift the kiwi to a midpoint between the arms
+    - relocate the kiwi to be evenly between the arms
+    - adjust the kiwi so it's in the middle of the arms

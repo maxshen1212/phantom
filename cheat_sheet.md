@@ -27,8 +27,15 @@ echo $CUDA_VISIBLE_DEVICES
 cd phantom/phantom
 python process_data.py demo_name=epic mode=all --config-name=epic
 python process_data.py demo_name=tri mode=all --config-name=tri
+python process_data.py demo_name=PutKiwiInCenterOfTable mode=all --config-name=tri
 
 # (not useful) Lock the package version for testing.
 conda run -n phantom pip freeze > /data/maxshen/phantom/requirements_locked.txt
 pip install -r requirements_locked.txt
+
+conda run -n phantom python3 /data/maxshen/phantom/TRI_scripts/Max/convert/convert_processed_to_h5_2d.py \
+    --processed_dir /data/maxshen/phantom/data/processed/tri \
+    --lang_annotations /data/maxshen/phantom/data/language_annotations.yaml \
+    --output /data/maxshen/phantom/data/tri_2d_lang.h5 \
+    2>&1
 ```

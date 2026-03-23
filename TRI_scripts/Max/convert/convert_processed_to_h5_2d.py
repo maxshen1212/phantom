@@ -1,19 +1,25 @@
 """
-Pure 2D HDF5 Data Parser for TRI (Toyota Research Institute) Videos.
+Language-Conditioned Pure 2D HDF5 Data Parser for TRI Videos.
 
 Converts phantom-pipeline processed TRI demos into a single HDF5 file
-compatible with the BaseBufferEpicH5 dataloader.
+compatible with the BaseBufferEpicH5 dataloader. Each demo receives a
+DistilBERT-encoded language embedding sampled from a task-specific
+instruction dictionary.
 
 Pipeline per demo:
+  0. Load DistilBERT model + instruction dictionary at startup
   1. Read overlay video frames and 2D hand keypoints
   2. Compute pairwise homographies via SIFT + RANSAC
   3. Filter frames by camera motion (translation > 5cm or rotation > 0.5 rad)
   4. Warp future 2D wrist keypoints back to current frame via cumulative homography
-  5. Pack into 32x24 action vectors and write HDF5
+  5. Pack into 32x24 action vectors
+  6. Sample a random instruction for the task, encode with DistilBERT [CLS] -> (1,768)
+  7. Write HDF5 with real language embeddings and noise-filled placeholders
 
 Usage:
     python convert_processed_to_h5_2d.py \
-        --processed_dir /data/maxshen/phantom/data/processed/tri \
+        --processed_dir /data/maxshen/phantom/data/processed/PutKiwiInCenterOfTable \
+        --lang_annotations /data/maxshen/phantom/data/language_annotations.yaml \
         --intrinsics /data/maxshen/phantom/phantom/camera/camera_intrinsics_tri.json \
         --output /data/maxshen/phantom/data/tri_2d.h5
 """
@@ -29,7 +35,10 @@ import cv2
 import h5py
 import mediapy as media
 import numpy as np
+import torch
+import yaml
 from tqdm import tqdm
+from transformers import DistilBertModel, DistilBertTokenizer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,9 +72,93 @@ IMG_W, IMG_H = 456, 256
 
 # Placeholder dimensions for fields the 2D pipeline does not produce
 STATE_DIM = 14
-LANG_DIM = 512
+LANG_DIM = 768  # DistilBERT [CLS] hidden size
 GMM_N_CONTACTS = 5
 GMM_N_FEAT = 3
+PLACEHOLDER_NOISE_SCALE = 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Language processing  (DistilBERT + instruction dictionary)
+# ---------------------------------------------------------------------------
+
+def load_language_dict(yaml_path: str) -> Dict[str, List[str]]:
+    """
+    Load instruction dictionary from YAML.
+
+    Returns a flat mapping: task_name -> merged list of (original + randomized)
+    instruction strings.
+    """
+    with open(yaml_path) as f:
+        data = yaml.safe_load(f)
+
+    lang_dict: Dict[str, List[str]] = {}
+    for task_name, entry in data.get("language_dict", {}).items():
+        pool: List[str] = []
+        pool.extend(entry.get("original") or [])
+        pool.extend(entry.get("randomized") or [])
+        if pool:
+            lang_dict[task_name] = pool
+    return lang_dict
+
+
+def init_distilbert(
+    device: str = "cpu",
+) -> Tuple["DistilBertTokenizer", "DistilBertModel", str]:
+    """
+    Load pre-trained DistilBERT tokenizer and model in eval mode.
+
+    Returns (tokenizer, model, device_str).
+    """
+    tokenizer = DistilBertTokenizer.from_pretrained("distilbert-base-uncased")
+    model = DistilBertModel.from_pretrained("distilbert-base-uncased")
+    model.to(device)
+    model.eval()
+    logger.info("DistilBERT loaded on %s", device)
+    return tokenizer, model, device
+
+
+@torch.no_grad()
+def encode_instruction(
+    text: str,
+    tokenizer: "DistilBertTokenizer",
+    model: "DistilBertModel",
+    device: str,
+) -> np.ndarray:
+    """
+    Encode a single instruction string into a (1, 768) float32 numpy array
+    using the DistilBERT [CLS] token's last hidden state.
+
+    Returns zeros if the input text is empty.
+    """
+    if not text:
+        return np.zeros((1, LANG_DIM), dtype=np.float32)
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=64)
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    cls_vec = model(**inputs).last_hidden_state[:, 0, :]  # (1, 768)
+    return cls_vec.cpu().numpy().astype(np.float32)
+
+
+def sample_instruction(
+    processed_dir: str,
+    lang_dict: Dict[str, List[str]],
+    rng: np.random.Generator,
+) -> str:
+    """
+    Derive the task name from the basename of *processed_dir*, look it up in
+    *lang_dict*, and return a randomly sampled instruction string.
+
+    Falls back to an empty string if the task is not in the dictionary.
+    """
+    task_name = Path(processed_dir).name
+    pool = lang_dict.get(task_name)
+    if not pool:
+        logger.warning(
+            "Task '%s' not found in language dict – using empty embedding",
+            task_name,
+        )
+        return ""
+    return rng.choice(pool)
 
 
 # ---------------------------------------------------------------------------
@@ -284,14 +377,21 @@ def write_h5(output_path: str, demos: List[Dict]) -> None:
             attrs:  num_samples
             action:                      (N, 768)   float32
             obs/frontview_image:         (N, H, W, 3)  uint8
-            obs/state:                   (N, 14)    float32  (placeholder)
-            obs/language_embedding:      (1, 512)   float32  (placeholder)
-            contact/gmm_contacts_left:   (N, 5, 3)  float32  (placeholder)
-            contact/gmm_contacts_right:  (N, 5, 3)  float32  (placeholder)
-            contact/intersected_bbox_left:  (N, 4)  float32  (placeholder)
-            contact/intersected_bbox_right: (N, 4)  float32  (placeholder)
+            obs/state:                   (N, 14)    float32  (noise placeholder)
+            obs/language_embedding:      (1, 768)   float32  (DistilBERT [CLS])
+            contact/gmm_contacts_left:   (N, 5, 3)  float32  (noise placeholder)
+            contact/gmm_contacts_right:  (N, 5, 3)  float32  (noise placeholder)
+            contact/intersected_bbox_left:  (N, 4)  float32  (noise placeholder)
+            contact/intersected_bbox_right: (N, 4)  float32  (noise placeholder)
+
+    Placeholder fields are filled with N(0, 1e-6) noise to prevent
+    division-by-zero when BaseBufferEpicH5._init_stats() computes std.
     """
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    rng = np.random.default_rng(42)
+
+    def _noise(shape: Tuple[int, ...]) -> np.ndarray:
+        return rng.normal(0, PLACEHOLDER_NOISE_SCALE, shape).astype(np.float32)
 
     with h5py.File(output_path, "w") as f:
         data_grp = f.create_group("data")
@@ -307,29 +407,23 @@ def write_h5(output_path: str, demos: List[Dict]) -> None:
                 "obs/frontview_image", data=d["images"],
                 chunks=(1, IMG_H, IMG_W, 3),
             )
+            dg.create_dataset("obs/state", data=_noise((N, STATE_DIM)))
             dg.create_dataset(
-                "obs/state",
-                data=np.zeros((N, STATE_DIM), dtype=np.float32),
-            )
-            dg.create_dataset(
-                "obs/language_embedding",
-                data=np.zeros((1, LANG_DIM), dtype=np.float32),
+                "obs/language_embedding", data=d["lang_embedding"],
             )
             dg.create_dataset(
                 "contact/gmm_contacts_left",
-                data=np.zeros((N, GMM_N_CONTACTS, GMM_N_FEAT), dtype=np.float32),
+                data=_noise((N, GMM_N_CONTACTS, GMM_N_FEAT)),
             )
             dg.create_dataset(
                 "contact/gmm_contacts_right",
-                data=np.zeros((N, GMM_N_CONTACTS, GMM_N_FEAT), dtype=np.float32),
+                data=_noise((N, GMM_N_CONTACTS, GMM_N_FEAT)),
             )
             dg.create_dataset(
-                "contact/intersected_bbox_left",
-                data=np.zeros((N, 4), dtype=np.float32),
+                "contact/intersected_bbox_left", data=_noise((N, 4)),
             )
             dg.create_dataset(
-                "contact/intersected_bbox_right",
-                data=np.zeros((N, 4), dtype=np.float32),
+                "contact/intersected_bbox_right", data=_noise((N, 4)),
             )
 
     total_frames = sum(d["actions"].shape[0] for d in demos)
@@ -343,8 +437,17 @@ def write_h5(output_path: str, demos: List[Dict]) -> None:
 # Per-demo orchestrator
 # ---------------------------------------------------------------------------
 
-def process_demo(demo_dir: str, K: np.ndarray) -> Optional[Dict]:
-    """Process one demo directory. Returns dict with 'images' and 'actions'."""
+def process_demo(
+    demo_dir: str,
+    K: np.ndarray,
+    lang_embedding: np.ndarray,
+) -> Optional[Dict]:
+    """
+    Process one demo directory.
+
+    Returns dict with 'images', 'actions', and 'lang_embedding',
+    or None if the demo has no valid frames.
+    """
     data = load_demo_data(demo_dir)
     if data is None:
         return None
@@ -374,7 +477,11 @@ def process_demo(demo_dir: str, K: np.ndarray) -> Optional[Dict]:
         homographies, valid_idx, N,
     )
 
-    return {"images": frames[valid_idx], "actions": actions}
+    return {
+        "images": frames[valid_idx],
+        "actions": actions,
+        "lang_embedding": lang_embedding,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -387,8 +494,10 @@ def main():
     )
     parser.add_argument(
         "--processed_dir", type=str,
-        default="/data/maxshen/phantom/data/processed/tri",
-        help="Root dir containing numbered demo sub-directories",
+        default="/data/maxshen/phantom/data/processed/PutKiwiInCenterOfTable",
+        help="Root dir containing numbered demo sub-directories. "
+             "The directory basename is used as the task name for "
+             "language annotation lookup.",
     )
     parser.add_argument(
         "--intrinsics", type=str,
@@ -400,11 +509,31 @@ def main():
         default="/data/maxshen/phantom/data/tri_2d.h5",
         help="Output HDF5 path",
     )
+    parser.add_argument(
+        "--lang_annotations", type=str,
+        default="/data/maxshen/phantom/data/language_annotations.yaml",
+        help="YAML file mapping task names to instruction strings",
+    )
+    parser.add_argument(
+        "--device", type=str, default="cpu",
+        help="Device for DistilBERT inference (cpu or cuda)",
+    )
     args = parser.parse_args()
 
+    # ---- Camera intrinsics ----
     K = load_intrinsics(args.intrinsics)
     logger.info("Camera K:\n%s", K)
 
+    # ---- Language model & dictionary ----
+    lang_dict = load_language_dict(args.lang_annotations)
+    logger.info(
+        "Loaded language dict: %d tasks (%s …)",
+        len(lang_dict), ", ".join(list(lang_dict.keys())[:3]),
+    )
+    tokenizer, bert_model, device = init_distilbert(args.device)
+    lang_rng = np.random.default_rng(123)
+
+    # ---- Discover demo directories ----
     processed = Path(args.processed_dir)
     demo_dirs = sorted(
         [d for d in processed.iterdir() if d.is_dir()],
@@ -416,7 +545,12 @@ def main():
     for dd in demo_dirs:
         logger.info("=" * 50)
         logger.info("Processing demo %s …", dd.name)
-        result = process_demo(str(dd), K)
+
+        instruction = sample_instruction(args.processed_dir, lang_dict, lang_rng)
+        lang_emb = encode_instruction(instruction, tokenizer, bert_model, device)
+        logger.info("  Instruction: %r  -> embedding shape %s", instruction, lang_emb.shape)
+
+        result = process_demo(str(dd), K, lang_emb)
         if result is not None:
             demos.append(result)
 
