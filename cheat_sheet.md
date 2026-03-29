@@ -27,6 +27,9 @@ conda activate phantom
 python process_data.py demo_name=epic mode=all --config-name=epic
 python process_data.py demo_name=tri mode=all --config-name=tri
 python process_data.py demo_name=PutKiwiInCenterOfTable mode=all --config-name=tri
+python process_data.py demo_name=BimanualAppleFromBowlToCuttingBoard mode=all --config-name=tri
+python process_data.py demo_name=TurnCupUpsideDown mode=all --config-name=tri
+python process_data.py demo_name=TurnMugRightsideUp mode=all --config-name=tri
 
 # (not useful) Lock the package version for testing.
 conda activate phantom
