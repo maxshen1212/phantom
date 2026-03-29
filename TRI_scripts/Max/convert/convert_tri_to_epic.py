@@ -4,14 +4,21 @@ Pipeline: Load episode => Project 3D joints to 2D => Compute bbox => Save EPIC f
 Also downsamples main_camera.mp4 from 1920x1080 to 456x256 for E2FGVI compatibility.
 """
 
+import argparse
 import gzip
 import json
 import logging
 import os
 import pickle
+import re
 import shutil
 import sys
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    import yaml
+except ImportError:
+    yaml = None  # type: ignore
 
 import cv2
 import numpy as np
@@ -561,6 +568,168 @@ def find_all_episodes(base_dir: str) -> List[str]:
     return episode_paths
 
 
+# Immediate child directories named like YYYY-MM-DD... (e.g. 2025-11-13_12-46-27)
+_DATE_DIR_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def _is_date_named_dir(dirname: str) -> bool:
+    return bool(_DATE_DIR_PREFIX.match(dirname))
+
+
+def discover_episode_pkls_ordered(input_base_dir: str) -> List[str]:
+    """
+    If input_base_dir contains date-stamped subfolders (YYYY-MM-DD...), collect
+    episode.pkl paths in date-folder order, then episode order within each folder.
+    Otherwise fall back to find_all_episodes(input_base_dir).
+    """
+    input_base_dir = os.path.abspath(input_base_dir)
+    try:
+        names = os.listdir(input_base_dir)
+    except OSError:
+        return find_all_episodes(input_base_dir)
+
+    date_dirs = sorted(
+        os.path.join(input_base_dir, n)
+        for n in names
+        if _is_date_named_dir(n) and os.path.isdir(os.path.join(input_base_dir, n))
+    )
+    if not date_dirs:
+        return find_all_episodes(input_base_dir)
+
+    episode_paths: List[str] = []
+    for d in date_dirs:
+        episode_paths.extend(find_all_episodes(d))
+    return episode_paths
+
+
+def load_language_dict_from_yaml(yaml_path: str) -> Dict[str, Any]:
+    if yaml is None:
+        raise ImportError("PyYAML is required to load language annotations (pip install pyyaml).")
+    with open(yaml_path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    return data.get("language_dict") or {}
+
+
+def resolve_language_task_key(
+    explicit_key: Optional[str],
+    input_base_dir: str,
+    lang_dict: Dict[str, Any],
+) -> Optional[str]:
+    """Pick YAML language_dict key from --language-task-key or input folder basename."""
+    if explicit_key:
+        if explicit_key in lang_dict:
+            return explicit_key
+        logger.warning("language-task-key %r not found in YAML", explicit_key)
+        return None
+
+    base_path = os.path.abspath(input_base_dir.rstrip(os.sep))
+    infer_path = base_path
+    if _is_date_named_dir(os.path.basename(base_path)):
+        parent = os.path.dirname(base_path)
+        if parent:
+            infer_path = parent
+
+    base = os.path.basename(infer_path)
+    candidates: List[str] = [base]
+    if base.startswith("ego") and len(base) > 3:
+        candidates.append(base[3:])
+
+    seen = set()
+    ordered: List[str] = []
+    for c in candidates:
+        if c not in seen:
+            seen.add(c)
+            ordered.append(c)
+
+    for c in ordered:
+        if c in lang_dict:
+            return c
+
+    logger.warning(
+        "Could not resolve language_dict key from input dir name %r (tried %s)",
+        base,
+        ordered,
+    )
+    return None
+
+
+def language_entry_to_json_serializable(entry: Any) -> Any:
+    """Recursively convert YAML-loaded structures to JSON-safe types."""
+    if isinstance(entry, dict):
+        return {k: language_entry_to_json_serializable(v) for k, v in entry.items() if v is not None}
+    if isinstance(entry, list):
+        return [language_entry_to_json_serializable(x) for x in entry]
+    return entry
+
+
+def write_language_manifest(
+    output_base_dir: str,
+    input_base_dir: str,
+    episode_paths: List[str],
+    yaml_task_key: Optional[str],
+    language_dict_entry: Optional[Dict[str, Any]],
+) -> str:
+    os.makedirs(output_base_dir, exist_ok=True)
+    manifest_path = os.path.join(output_base_dir, "language_manifest.json")
+    episodes = [
+        {
+            "index": i,
+            "episode_pkl": os.path.abspath(p),
+            "source_episode_dir": os.path.abspath(os.path.dirname(p)),
+        }
+        for i, p in enumerate(episode_paths)
+    ]
+    payload = {
+        "yaml_task_key": yaml_task_key,
+        "language_dict_entry": language_entry_to_json_serializable(language_dict_entry)
+        if language_dict_entry is not None
+        else None,
+        "input_base_dir": os.path.abspath(input_base_dir),
+        "episodes": episodes,
+    }
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    return manifest_path
+
+
+def parse_args() -> argparse.Namespace:
+    env = os.environ
+    parser = argparse.ArgumentParser(
+        description="Convert TRI episode.pkl + video to EPIC-style hand_det.pkl and downsampled video."
+    )
+    parser.add_argument(
+        "--input-base-dir",
+        default=env.get("TRI_CONVERT_INPUT"),
+        help="Root: single session folder or task folder with YYYY-MM-DD* children. Env: TRI_CONVERT_INPUT.",
+    )
+    parser.add_argument(
+        "--output-base-dir",
+        default=env.get("TRI_CONVERT_OUTPUT", "/data/maxshen/phantom/data/raw"),
+        help="Episodes written to <this>/0, <this>/1, ... Env: TRI_CONVERT_OUTPUT.",
+    )
+    parser.add_argument(
+        "--force-reprocess",
+        action="store_true",
+        help="Re-run even if hand_det.pkl exists. Env TRI_CONVERT_FORCE=1 also enables.",
+    )
+    parser.add_argument(
+        "--language-yaml",
+        default="/data/maxshen/Video_data/language_annotations.yaml",
+        help="language_annotations.yaml path (language_dict).",
+    )
+    parser.add_argument(
+        "--language-task-key",
+        default=None,
+        help="language_dict key (e.g. PutKiwiInCenterOfTable). If omitted, inferred from --input-base-dir basename.",
+    )
+    args = parser.parse_args()
+    if env.get("TRI_CONVERT_FORCE", "").strip().lower() in ("1", "true", "yes"):
+        args.force_reprocess = True
+    if not args.input_base_dir:
+        parser.error("--input-base-dir is required (or set TRI_CONVERT_INPUT).")
+    return args
+
+
 def process_single_episode(
     episode_path: str,
     output_dir: str,
@@ -608,32 +777,50 @@ def process_single_episode(
 
 def main():
     """
-    Batch-convert all TRI episodes under INPUT_BASE_DIR to EPIC format.
+    Batch-convert all TRI episodes under the input root to EPIC format.
 
     Each episode is written to a numbered sub-directory under OUTPUT_BASE_DIR.
     Already-processed episodes (hand_det.pkl exists) are skipped unless
-    FORCE_REPROCESS is True.
+    force reprocess is enabled (CLI or TRI_CONVERT_FORCE).
     """
-    INPUT_BASE_DIR = "/data/maxshen/Video_data/LBM_human_egocentric/egoPutKiwiInCenterOfTable/2025-11-13_12-46-27"
-    OUTPUT_BASE_DIR = "/data/maxshen/phantom/data/raw/tri"
-    FORCE_REPROCESS = False
+    args = parse_args()
+    input_base_dir = os.path.abspath(args.input_base_dir)
+    output_base_dir = os.path.abspath(args.output_base_dir)
+    force_reprocess = args.force_reprocess
 
     print("=" * 60)
     print("TRI to EPIC Hand Detection Converter  (batch mode)")
     print("=" * 60)
-    print(f"\nSearching for episodes in: {INPUT_BASE_DIR}")
+    print(f"\nSearching for episodes in: {input_base_dir}")
 
-    episode_paths = find_all_episodes(INPUT_BASE_DIR)
+    episode_paths = discover_episode_pkls_ordered(input_base_dir)
     if not episode_paths:
         print("Error: No episode.pkl files found.")
         return 1
     print(f"Found {len(episode_paths)} episode(s).\n")
 
+    yaml_task_key: Optional[str] = None
+    language_dict_entry: Optional[Dict[str, Any]] = None
+    if yaml is None:
+        logger.warning("PyYAML not installed; language_dict_entry in manifest will be null (pip install pyyaml).")
+    elif os.path.isfile(args.language_yaml):
+        try:
+            lang_dict = load_language_dict_from_yaml(args.language_yaml)
+            yaml_task_key = resolve_language_task_key(
+                args.language_task_key, input_base_dir, lang_dict
+            )
+            if yaml_task_key is not None:
+                language_dict_entry = lang_dict.get(yaml_task_key)
+        except Exception:
+            logger.exception("Failed to load %s; manifest will omit language_dict_entry", args.language_yaml)
+    else:
+        logger.warning("language-yaml not found: %s", args.language_yaml)
+
     results = {"success": 0, "skipped": 0, "failed": 0}
     save_camera_params_done = False
 
     for idx, episode_path in enumerate(episode_paths):
-        output_dir = os.path.join(OUTPUT_BASE_DIR, str(idx))
+        output_dir = os.path.join(output_base_dir, str(idx))
 
         print("=" * 60)
         print(f"[{idx + 1}/{len(episode_paths)}] index={idx}")
@@ -641,7 +828,7 @@ def main():
         print(f"  Output: {output_dir}")
 
         hand_det_path = os.path.join(output_dir, "hand_det.pkl")
-        if os.path.exists(hand_det_path) and not FORCE_REPROCESS:
+        if os.path.exists(hand_det_path) and not force_reprocess:
             print("  => Already processed, skipping.")
             results["skipped"] += 1
             continue
@@ -659,6 +846,20 @@ def main():
 
         results["success" if success else "failed"] += 1
 
+    try:
+        manifest_path = write_language_manifest(
+            output_base_dir,
+            input_base_dir,
+            episode_paths,
+            yaml_task_key,
+            language_dict_entry,
+        )
+        print(f"\nWrote language manifest: {manifest_path}")
+    except Exception:
+        logger.exception("Failed to write language_manifest.json")
+
+    demo_hint = os.path.basename(output_base_dir.rstrip(os.sep)) or "YOUR_DEMO_NAME"
+
     print("\n" + "=" * 60)
     print("Conversion complete!")
     print(f"  Succeeded : {results['success']}")
@@ -669,7 +870,7 @@ def main():
     print()
     print("Next steps:")
     print("  cd /data/maxshen/phantom/phantom")
-    print("  python process_data.py demo_name=tri mode=all --config-name=tri")
+    print(f"  python process_data.py demo_name={demo_hint} mode=all --config-name=tri")
     print("=" * 60)
 
     return 0 if results["failed"] == 0 else 1

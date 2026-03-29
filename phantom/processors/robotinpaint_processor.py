@@ -64,7 +64,7 @@ class RobotInpaintProcessor(BaseProcessor):
     # Processing constants for quality control and output formatting
     # Original TRACKING_ERROR_THRESHOLD was 0.05, relaxed to 2.0 for better coverage with noisy tracking
     TRACKING_ERROR_THRESHOLD = 0.05  # Maximum tracking error in meters
-    DEFAULT_FPS = 15  # Standard frame rate for output videos
+    DEFAULT_FPS = 10  # Standard frame rate for output videos
     DEFAULT_CODEC = "ffv1"  # Lossless codec for high-quality output
 
     def __init__(self, args: Any) -> None:
