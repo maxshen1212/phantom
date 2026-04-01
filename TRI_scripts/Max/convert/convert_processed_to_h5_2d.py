@@ -1,27 +1,10 @@
 """
-Language-Conditioned Pure 2D HDF5 Data Parser for TRI Videos.
+Language-Conditioned Pure 2D HDF5 Data Parser for TRI Videos (Multiprocessing Edition).
 
-Converts phantom-pipeline processed TRI demos into a single HDF5 file
-compatible with the BaseBufferEpicH5 dataloader. Each demo receives a
-DistilBERT-encoded language embedding sampled from a task-specific
-instruction dictionary.
-
-Pipeline per demo:
-  0. Load DistilBERT model + instruction dictionary at startup
-  1. Read overlay video frames and 2D hand keypoints
-  2. Compute pairwise homographies via SIFT + RANSAC
-  3. Filter frames by camera motion (translation > 5cm or rotation > 0.5 rad)
-  4. Warp future 2D wrist keypoints back to current frame via cumulative homography
-  5. Pack into 32x24 action vectors
-  6. Sample a random instruction for the task, encode with DistilBERT [CLS] -> (1,768)
-  7. Write HDF5 with real language embeddings and noise-filled placeholders
-
-Usage:
-    python convert_processed_to_h5_2d.py \
-        --processed_dir /data/maxshen/phantom/data/processed/PutKiwiInCenterOfTable \
-        --lang_annotations /data/maxshen/phantom/data/language_annotations.yaml \
-        --intrinsics /data/maxshen/phantom/phantom/camera/camera_intrinsics_tri.json \
-        --output /data/maxshen/phantom/data/tri_2d.h5
+Converts phantom-pipeline processed TRI episodes into a single HDF5 file
+compatible with the BaseBufferEpicH5 dataloader.
+Optimized with ProcessPoolExecutor for high-throughput processing and
+incremental HDF5 writing to prevent Out-Of-Memory (OOM) on massive datasets.
 """
 
 import argparse
@@ -30,6 +13,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import cv2
 import h5py
@@ -48,13 +32,6 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Action layout constants (must match TRI_data_loader.py / BaseBufferEpicH5)
-#
-# Each sub-action has 24 values:
-#   Left  hand: x(0) y(1) z(2) x2d(3) y2d(4) r1-r6(5-10) g(11)
-#   Right hand: x(12) y(13) z(14) x2d(15) y2d(16) r1-r6(17-22) g(23)
-#
-# 32 sub-actions total => flat vector of 768.
-# BaseBufferEpicH5 subsamples with stride 4 => 8 waypoints x 4 values = 32.
 # ---------------------------------------------------------------------------
 ACTION_DIM = 24
 NUM_SUB_ACTIONS = 32
@@ -67,10 +44,10 @@ RIGHT_X2D, RIGHT_Y2D = 15, 16
 TRANSLATION_THRESH_M = 0.05
 ROTATION_THRESH_RAD = 0.5
 
-# Target resolution (post-phantom-pipeline overlay video)
+# Target resolution
 IMG_W, IMG_H = 456, 256
 
-# Placeholder dimensions for fields the 2D pipeline does not produce
+# Placeholder dimensions
 STATE_DIM = 14
 LANG_DIM = 768  # DistilBERT [CLS] hidden size
 GMM_N_CONTACTS = 5
@@ -83,12 +60,6 @@ PLACEHOLDER_NOISE_SCALE = 1e-6
 # ---------------------------------------------------------------------------
 
 def load_language_dict(yaml_path: str) -> Dict[str, List[str]]:
-    """
-    Load instruction dictionary from YAML.
-
-    Returns a flat mapping: task_name -> merged list of (original + randomized)
-    instruction strings.
-    """
     with open(yaml_path) as f:
         data = yaml.safe_load(f)
 
@@ -102,14 +73,7 @@ def load_language_dict(yaml_path: str) -> Dict[str, List[str]]:
     return lang_dict
 
 
-def init_distilbert(
-    device: str = "cpu",
-) -> Tuple["DistilBertTokenizer", "DistilBertModel", str]:
-    """
-    Load pre-trained DistilBERT tokenizer and model in eval mode.
-
-    Returns (tokenizer, model, device_str).
-    """
+def init_distilbert(device: str = "cpu") -> Tuple["DistilBertTokenizer", "DistilBertModel", str]:
     tokenizer = DistilBertTokenizer.from_pretrained("distilbert-base-uncased")
     model = DistilBertModel.from_pretrained("distilbert-base-uncased")
     model.to(device)
@@ -119,18 +83,7 @@ def init_distilbert(
 
 
 @torch.no_grad()
-def encode_instruction(
-    text: str,
-    tokenizer: "DistilBertTokenizer",
-    model: "DistilBertModel",
-    device: str,
-) -> np.ndarray:
-    """
-    Encode a single instruction string into a (1, 768) float32 numpy array
-    using the DistilBERT [CLS] token's last hidden state.
-
-    Returns zeros if the input text is empty.
-    """
+def encode_instruction(text: str, tokenizer: "DistilBertTokenizer", model: "DistilBertModel", device: str) -> np.ndarray:
     if not text:
         return np.zeros((1, LANG_DIM), dtype=np.float32)
     inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=64)
@@ -139,24 +92,10 @@ def encode_instruction(
     return cls_vec.cpu().numpy().astype(np.float32)
 
 
-def sample_instruction(
-    processed_dir: str,
-    lang_dict: Dict[str, List[str]],
-    rng: np.random.Generator,
-) -> str:
-    """
-    Derive the task name from the basename of *processed_dir*, look it up in
-    *lang_dict*, and return a randomly sampled instruction string.
-
-    Falls back to an empty string if the task is not in the dictionary.
-    """
-    task_name = Path(processed_dir).name
+def sample_instruction(task_name: str, lang_dict: Dict[str, List[str]], rng: np.random.Generator) -> str:
     pool = lang_dict.get(task_name)
     if not pool:
-        logger.warning(
-            "Task '%s' not found in language dict – using empty embedding",
-            task_name,
-        )
+        logger.warning("Task '%s' not found in language dict – using empty embedding", task_name)
         return ""
     return rng.choice(pool)
 
@@ -166,7 +105,6 @@ def sample_instruction(
 # ---------------------------------------------------------------------------
 
 def load_intrinsics(path: str) -> np.ndarray:
-    """Load 3x3 camera intrinsic matrix from Phantom camera JSON."""
     with open(path) as f:
         cam = json.load(f)
     e = cam["left"]
@@ -177,9 +115,8 @@ def load_intrinsics(path: str) -> np.ndarray:
     ], dtype=np.float64)
 
 
-def load_demo_data(demo_dir: str) -> Optional[Dict]:
-    """Load all required files for a single demo. Returns None on failure."""
-    dd = Path(demo_dir)
+def load_episode_data(episode_dir: str) -> Optional[Dict]:
+    dd = Path(episode_dir)
     overlay = dd / "video_overlay_Panda_shoulders.mkv"
     td_path = dd / "inpaint_processor" / "training_data_shoulders.npz"
     hl_path = dd / "hand_processor" / "hand_data_left.npz"
@@ -187,7 +124,6 @@ def load_demo_data(demo_dir: str) -> Optional[Dict]:
 
     for p in [overlay, td_path, hl_path, hr_path]:
         if not p.exists():
-            logger.warning("Missing %s – skipping demo %s", p.name, dd.name)
             return None
 
     frames = media.read_video(str(overlay))
@@ -206,16 +142,10 @@ def load_demo_data(demo_dir: str) -> Optional[Dict]:
 
 
 # ---------------------------------------------------------------------------
-# Homography computation
+# Homography computation & Filter & Action builder
 # ---------------------------------------------------------------------------
 
-def compute_pairwise_homographies(
-    frames: np.ndarray,
-) -> List[Optional[np.ndarray]]:
-    """
-    Compute H[t] that maps a point in frame t to frame t+1 for every
-    consecutive pair, using SIFT features with ratio-test + RANSAC.
-    """
+def compute_pairwise_homographies(frames: np.ndarray) -> List[Optional[np.ndarray]]:
     N = len(frames)
     sift = cv2.SIFT_create()
     bf = cv2.BFMatcher()
@@ -224,7 +154,8 @@ def compute_pairwise_homographies(
     prev_gray = cv2.cvtColor(frames[0], cv2.COLOR_RGB2GRAY)
     prev_kp, prev_des = sift.detectAndCompute(prev_gray, None)
 
-    for t in tqdm(range(N - 1), desc="  Homographies", leave=False):
+    # 移除內部的 tqdm 以避免多進程時終端機輸出混亂
+    for t in range(N - 1):
         curr_gray = cv2.cvtColor(frames[t + 1], cv2.COLOR_RGB2GRAY)
         curr_kp, curr_des = sift.detectAndCompute(curr_gray, None)
 
@@ -234,12 +165,8 @@ def compute_pairwise_homographies(
             matches = bf.knnMatch(prev_des, curr_des, k=2)
             good = [m for m, n in matches if m.distance < 0.75 * n.distance]
             if len(good) >= 4:
-                src = np.float32(
-                    [prev_kp[m.queryIdx].pt for m in good]
-                ).reshape(-1, 1, 2)
-                dst = np.float32(
-                    [curr_kp[m.trainIdx].pt for m in good]
-                ).reshape(-1, 1, 2)
+                src = np.float32([prev_kp[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+                dst = np.float32([curr_kp[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
                 H, _ = cv2.findHomography(src, dst, cv2.RANSAC, 5.0)
 
         result.append(H)
@@ -248,14 +175,7 @@ def compute_pairwise_homographies(
     return result
 
 
-# ---------------------------------------------------------------------------
-# Camera-motion filter
-# ---------------------------------------------------------------------------
-
-def _motion_from_H(
-    H: np.ndarray, K: np.ndarray, assumed_depth: float = 0.5,
-) -> Tuple[float, float]:
-    """Estimate (rotation_rad, translation_m) from a homography."""
+def _motion_from_H(H: np.ndarray, K: np.ndarray, assumed_depth: float = 0.5) -> Tuple[float, float]:
     try:
         n, Rs, Ts, _ = cv2.decomposeHomographyMat(H, K)
     except cv2.error:
@@ -270,16 +190,7 @@ def _motion_from_H(
     return best_rot, best_trans
 
 
-def camera_motion_mask(
-    homographies: List[Optional[np.ndarray]],
-    K: np.ndarray,
-) -> np.ndarray:
-    """
-    Boolean mask (N,) where True = frame passes the camera-motion filter.
-
-    Frame t+1 is rejected if the transition H[t] (frame t -> t+1) exceeds
-    the rotation or translation threshold.  Frame 0 is always valid.
-    """
+def camera_motion_mask(homographies: List[Optional[np.ndarray]], K: np.ndarray) -> np.ndarray:
     N = len(homographies) + 1
     ok = np.ones(N, dtype=bool)
     for t, H in enumerate(homographies):
@@ -292,34 +203,13 @@ def camera_motion_mask(
     return ok
 
 
-# ---------------------------------------------------------------------------
-# Action builder  (cumulative homography + wrist warping)
-# ---------------------------------------------------------------------------
-
 def _warp_pt(pt: np.ndarray, H: np.ndarray) -> np.ndarray:
-    """Apply homography H to a single 2D point."""
     p = np.array([pt[0], pt[1], 1.0])
     q = H @ p
     return q[:2] / q[2] if abs(q[2]) > 1e-10 else pt[:2].copy()
 
 
-def build_actions(
-    kpts_L: np.ndarray,
-    kpts_R: np.ndarray,
-    homographies: List[Optional[np.ndarray]],
-    valid_idx: np.ndarray,
-    N_total: int,
-) -> np.ndarray:
-    """
-    Build the (len(valid_idx), 768) action array.
-
-    For each valid frame t and each sub-action k = 0..31:
-      future = min(t + k + 1, N_total - 1)
-      Warp the wrist keypoint at `future` back to frame t's viewpoint
-      using the cumulative inverse homography chain.
-
-    H_{future -> t} = inv(H[t]) @ inv(H[t+1]) @ ... @ inv(H[future-1])
-    """
+def build_actions(kpts_L: np.ndarray, kpts_R: np.ndarray, homographies: List[Optional[np.ndarray]], valid_idx: np.ndarray, N_total: int) -> np.ndarray:
     H_inv: List[Optional[np.ndarray]] = []
     for H in homographies:
         if H is None:
@@ -332,15 +222,13 @@ def build_actions(
 
     actions = np.zeros((len(valid_idx), ACTION_VEC_LEN), dtype=np.float32)
 
-    for vi, t in enumerate(tqdm(valid_idx, desc="  Actions", leave=False)):
+    for vi, t in enumerate(valid_idx):
         H_cum = np.eye(3, dtype=np.float64)
         chain_ok = True
         prev_f = t
 
         for k in range(NUM_SUB_ACTIONS):
             fut = min(t + k + 1, N_total - 1)
-
-            # Extend the cumulative inverse-homography chain one step at a time
             while prev_f < fut and chain_ok:
                 if prev_f < len(H_inv) and H_inv[prev_f] is not None:
                     H_cum = H_cum @ H_inv[prev_f]
@@ -365,205 +253,146 @@ def build_actions(
 
 
 # ---------------------------------------------------------------------------
-# HDF5 writer  (BaseBufferEpicH5-compatible)
+# Worker & Incremental Writer for Multiprocessing
 # ---------------------------------------------------------------------------
 
-def write_h5(output_path: str, demos: List[Dict]) -> None:
+def process_episode_worker(args_tuple) -> Optional[Dict]:
     """
-    Write all processed demos into a single HDF5 file.
-
-    Layout per demo (matches BaseBufferEpicH5._sample expectations):
-        data/<key>/
-            attrs:  num_samples
-            action:                      (N, 768)   float32
-            obs/frontview_image:         (N, H, W, 3)  uint8
-            obs/state:                   (N, 14)    float32  (noise placeholder)
-            obs/language_embedding:      (1, 768)   float32  (DistilBERT [CLS])
-            contact/gmm_contacts_left:   (N, 5, 3)  float32  (noise placeholder)
-            contact/gmm_contacts_right:  (N, 5, 3)  float32  (noise placeholder)
-            contact/intersected_bbox_left:  (N, 4)  float32  (noise placeholder)
-            contact/intersected_bbox_right: (N, 4)  float32  (noise placeholder)
-
-    Placeholder fields are filled with N(0, 1e-6) noise to prevent
-    division-by-zero when BaseBufferEpicH5._init_stats() computes std.
+    Worker function executed by each CPU core.
+    Processes a single episode and returns the dictionary ready for writing.
     """
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    rng = np.random.default_rng(42)
-
-    def _noise(shape: Tuple[int, ...]) -> np.ndarray:
-        return rng.normal(0, PLACEHOLDER_NOISE_SCALE, shape).astype(np.float32)
-
-    with h5py.File(output_path, "w") as f:
-        data_grp = f.create_group("data")
-
-        for i, d in enumerate(demos):
-            key = f"demo_{i}"
-            dg = data_grp.create_group(key)
-            N = d["actions"].shape[0]
-            dg.attrs["num_samples"] = N
-
-            dg.create_dataset("action", data=d["actions"])
-            dg.create_dataset(
-                "obs/frontview_image", data=d["images"],
-                chunks=(1, IMG_H, IMG_W, 3),
-            )
-            dg.create_dataset("obs/state", data=_noise((N, STATE_DIM)))
-            dg.create_dataset(
-                "obs/language_embedding", data=d["lang_embedding"],
-            )
-            dg.create_dataset(
-                "contact/gmm_contacts_left",
-                data=_noise((N, GMM_N_CONTACTS, GMM_N_FEAT)),
-            )
-            dg.create_dataset(
-                "contact/gmm_contacts_right",
-                data=_noise((N, GMM_N_CONTACTS, GMM_N_FEAT)),
-            )
-            dg.create_dataset(
-                "contact/intersected_bbox_left", data=_noise((N, 4)),
-            )
-            dg.create_dataset(
-                "contact/intersected_bbox_right", data=_noise((N, 4)),
-            )
-
-    total_frames = sum(d["actions"].shape[0] for d in demos)
-    logger.info(
-        "Wrote %d demos (%d total frames) => %s",
-        len(demos), total_frames, output_path,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Per-demo orchestrator
-# ---------------------------------------------------------------------------
-
-def process_demo(
-    demo_dir: str,
-    K: np.ndarray,
-    lang_embedding: np.ndarray,
-) -> Optional[Dict]:
-    """
-    Process one demo directory.
-
-    Returns dict with 'images', 'actions', and 'lang_embedding',
-    or None if the demo has no valid frames.
-    """
-    data = load_demo_data(demo_dir)
+    episode_dir, K, lang_embedding = args_tuple
+    data = load_episode_data(episode_dir)
     if data is None:
         return None
 
     frames = data["frames"]
     N = len(frames)
-    logger.info(
-        "  Frames: %d | pipeline-valid: %d/%d",
-        N, data["valid"].sum(), N,
-    )
 
     homographies = compute_pairwise_homographies(frames)
-
     cam_ok = camera_motion_mask(homographies, K)
-    logger.info("  Camera-motion valid: %d/%d", cam_ok.sum(), N)
 
     combined = data["valid"] & cam_ok
     valid_idx = np.where(combined)[0]
-    logger.info("  Combined valid: %d/%d", len(valid_idx), N)
 
     if len(valid_idx) == 0:
-        logger.warning("  No valid frames – skipping.")
         return None
 
-    actions = build_actions(
-        data["kpts_left"], data["kpts_right"],
-        homographies, valid_idx, N,
-    )
+    actions = build_actions(data["kpts_left"], data["kpts_right"], homographies, valid_idx, N)
 
     return {
+        "episode_dir": episode_dir,
         "images": frames[valid_idx],
         "actions": actions,
-        "lang_embedding": lang_embedding,
+        "lang_embedding": lang_embedding
     }
 
 
+def write_single_episode_to_h5(data_grp: h5py.Group, episode_idx: int, d: Dict, rng: np.random.Generator) -> int:
+    """
+    Writes a single processed episode to the open HDF5 file immediately.
+    Returns the number of frames written.
+    """
+    def _noise(shape: Tuple[int, ...]) -> np.ndarray:
+        return rng.normal(0, PLACEHOLDER_NOISE_SCALE, shape).astype(np.float32)
+
+    key = f"episode_{episode_idx}"
+    dg = data_grp.create_group(key)
+    N = d["actions"].shape[0]
+    dg.attrs["num_samples"] = N
+
+    dg.create_dataset("action", data=d["actions"])
+    dg.create_dataset("obs/frontview_image", data=d["images"], chunks=(1, IMG_H, IMG_W, 3))
+    dg.create_dataset("obs/state", data=_noise((N, STATE_DIM)))
+    dg.create_dataset("obs/language_embedding", data=d["lang_embedding"])
+    dg.create_dataset("contact/gmm_contacts_left", data=_noise((N, GMM_N_CONTACTS, GMM_N_FEAT)))
+    dg.create_dataset("contact/gmm_contacts_right", data=_noise((N, GMM_N_CONTACTS, GMM_N_FEAT)))
+    dg.create_dataset("contact/intersected_bbox_left", data=_noise((N, 4)))
+    dg.create_dataset("contact/intersected_bbox_right", data=_noise((N, 4)))
+
+    return N
+
+
 # ---------------------------------------------------------------------------
-# Main
+# Main Orchestrator
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Pure 2D HDF5 Data Parser for TRI videos",
-    )
-    parser.add_argument(
-        "--processed_dir", type=str,
-        default="/data/maxshen/phantom/data/processed/PutKiwiInCenterOfTable",
-        help="Root dir containing numbered demo sub-directories. "
-             "The directory basename is used as the task name for "
-             "language annotation lookup.",
-    )
-    parser.add_argument(
-        "--intrinsics", type=str,
-        default="/data/maxshen/phantom/phantom/camera/camera_intrinsics_tri.json",
-        help="Phantom camera intrinsics JSON",
-    )
-    parser.add_argument(
-        "--output", type=str,
-        default="/data/maxshen/phantom/data/tri_2d.h5",
-        help="Output HDF5 path",
-    )
-    parser.add_argument(
-        "--lang_annotations", type=str,
-        default="/data/maxshen/phantom/data/language_annotations.yaml",
-        help="YAML file mapping task names to instruction strings",
-    )
-    parser.add_argument(
-        "--device", type=str, default="cpu",
-        help="Device for DistilBERT inference (cpu or cuda)",
-    )
+    parser = argparse.ArgumentParser(description="Pure 2D HDF5 Data Parser for TRI videos (Multiprocessing)")
+
+    parser.add_argument("--processed_dir", type=str, required=True, help="Root dir containing task sub-directories.")
+    parser.add_argument("--intrinsics", type=str, default="/data/maxshen/phantom/phantom/camera/camera_intrinsics_tri.json", help="Phantom camera intrinsics JSON")
+    parser.add_argument("--output", type=str, required=True, help="Output HDF5 path")
+    parser.add_argument("--lang_annotations", type=str, required=True, help="YAML file mapping task names to instruction strings")
+    parser.add_argument("--device", type=str, default="cuda", help="Device for DistilBERT inference (cpu or cuda)")
+    parser.add_argument("--num_workers", type=int, default=8, help="Number of CPU cores to use for multiprocessing")
+
     args = parser.parse_args()
 
-    # ---- Camera intrinsics ----
-    K = load_intrinsics(args.intrinsics)
-    logger.info("Camera K:\n%s", K)
+    # Ensure output directory exists
+    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
 
-    # ---- Language model & dictionary ----
+    # 1. Initialization
+    K = load_intrinsics(args.intrinsics)
     lang_dict = load_language_dict(args.lang_annotations)
-    logger.info(
-        "Loaded language dict: %d tasks (%s …)",
-        len(lang_dict), ", ".join(list(lang_dict.keys())[:3]),
-    )
     tokenizer, bert_model, device = init_distilbert(args.device)
     lang_rng = np.random.default_rng(123)
 
-    # ---- Discover demo directories ----
-    processed = Path(args.processed_dir)
-    demo_dirs = sorted(
-        [d for d in processed.iterdir() if d.is_dir()],
-        key=lambda p: (int(p.name) if p.name.isdigit() else float("inf"), p.name),
-    )
-    logger.info("Found %d demo directories", len(demo_dirs))
+    processed_root = Path(args.processed_dir)
+    task_dirs = sorted([d for d in processed_root.iterdir() if d.is_dir()])
+    logger.info("Found %d Task directories inside %s", len(task_dirs), processed_root)
 
-    demos: List[Dict] = []
-    for dd in demo_dirs:
-        logger.info("=" * 50)
-        logger.info("Processing demo %s …", dd.name)
+    # 2. Pre-allocate tasks and pre-compute language embeddings (Fast, runs on Main Thread)
+    tasks_to_run = []
+    logger.info("Scanning directories and sampling language instructions...")
 
-        instruction = sample_instruction(args.processed_dir, lang_dict, lang_rng)
-        lang_emb = encode_instruction(instruction, tokenizer, bert_model, device)
-        logger.info("  Instruction: %r  -> embedding shape %s", instruction, lang_emb.shape)
+    for task_dir in task_dirs:
+        task_name = task_dir.name
+        episode_dirs = sorted(
+            [d for d in task_dir.iterdir() if d.is_dir()],
+            key=lambda p: (int(p.name) if p.name.isdigit() else float("inf"), p.name)
+        )
 
-        result = process_demo(str(dd), K, lang_emb)
-        if result is not None:
-            demos.append(result)
+        for dd in episode_dirs:
+            instruction = sample_instruction(task_name, lang_dict, lang_rng)
+            lang_emb = encode_instruction(instruction, tokenizer, bert_model, device)
+            tasks_to_run.append((str(dd), K, lang_emb))
 
-    if not demos:
-        logger.error("No demos produced valid data.")
-        return 1
+    logger.info("Total %d episodes queued for processing using %d workers.", len(tasks_to_run), args.num_workers)
 
-    write_h5(args.output, demos)
+    # 3. Multiprocessing & Incremental Writing
+    total_valid_episodes = 0
+    total_valid_frames = 0
+    noise_rng = np.random.default_rng(42)
 
-    logger.info("=" * 50)
-    logger.info("Done. %d demos converted.", len(demos))
+    # Open HDF5 file once in the main process
+    with h5py.File(args.output, "w") as f_out:
+        data_grp = f_out.create_group("data")
+
+        # Start the process pool
+        with ProcessPoolExecutor(max_workers=args.num_workers) as executor:
+            # Submit all tasks
+            futures = [executor.submit(process_episode_worker, args_tuple) for args_tuple in tasks_to_run]
+
+            # Use tqdm to monitor progress as tasks complete
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Processing Episodes"):
+                try:
+                    result = future.result()
+                    if result is not None:
+                        # Write immediately to disk and release memory
+                        frames_written = write_single_episode_to_h5(data_grp, total_valid_episodes, result, noise_rng)
+                        total_valid_episodes += 1
+                        total_valid_frames += frames_written
+
+                        # Explicitly delete the result dict to free RAM
+                        del result
+                except Exception as e:
+                    logger.error("Error processing an episode: %s", e)
+
+    logger.info("==================================================")
+    logger.info("Done. %d episodes (%d frames) successfully converted and written to %s.",
+                total_valid_episodes, total_valid_frames, args.output)
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

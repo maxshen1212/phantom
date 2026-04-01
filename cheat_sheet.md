@@ -41,15 +41,15 @@ cd /data/maxshen/phantom/TRI_scripts/Max/convert
 conda activate tri
 python convert_tri_to_epic.py \
   --input-base-dir /data/maxshen/Video_data/LBM_human_egocentric/egoTurnMugRightsideUp \
-  --output-base-dir /data/maxshen/phantom/data/raw/TurnMugRightsideUp \
-  --language-task-key TurnMugRightsideUp
+  --output-base-dir /data/maxshen/phantom/data/raw/TurnMugRightsideUp
 
 # convert all processed TRI inpainting data to h5
 cd /data/maxshen/phantom/TRI_scripts/Max/convert
-conda activate tri
+conda activate phantom
 python convert_processed_to_h5_2d.py \
-    --processed_dir /data/maxshen/phantom/data/processed/tri \
-    --lang_annotations /data/maxshen/phantom/data/language_annotations.yaml \
-    --output /data/maxshen/phantom/data/tri_2d_lang.h5 \
-    2>&1
+    --processed_dir /data/maxshen/phantom/data/processed \
+    --lang_annotations /data/maxshen/Video_data/language_annotations.yaml \
+    --output /data/maxshen/phantom/data/h5output/tri_2d_lang_4tasks_allEpisods.h5 \
+    --device cuda \
+    --num_workers 64
 ```

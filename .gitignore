@@ -3,6 +3,7 @@
 data/raw/*
 !data/raw/.gitkeep
 data/processed/*
+data/h5output/*
 !data/processed/.gitkeep
 **/__pycache__/*
 *.pyc
