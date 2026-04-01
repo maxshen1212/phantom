@@ -43,7 +43,7 @@ python convert_tri_to_epic.py \
   --input-base-dir /data/maxshen/Video_data/LBM_human_egocentric/egoTurnMugRightsideUp \
   --output-base-dir /data/maxshen/phantom/data/raw/TurnMugRightsideUp
 
-# convert all processed TRI inpainting data to h5
+# convert all TRI inpainting data processed by Phantom to h5 format
 cd /data/maxshen/phantom/TRI_scripts/Max/convert
 conda activate phantom
 python convert_processed_to_h5_2d.py \
