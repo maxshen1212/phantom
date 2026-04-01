@@ -13,12 +13,7 @@ import pickle
 import re
 import shutil
 import sys
-from typing import Any, Dict, List, Optional, Tuple
-
-try:
-    import yaml
-except ImportError:
-    yaml = None  # type: ignore
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -602,96 +597,6 @@ def discover_episode_pkls_ordered(input_base_dir: str) -> List[str]:
     return episode_paths
 
 
-def load_language_dict_from_yaml(yaml_path: str) -> Dict[str, Any]:
-    if yaml is None:
-        raise ImportError("PyYAML is required to load language annotations (pip install pyyaml).")
-    with open(yaml_path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-    return data.get("language_dict") or {}
-
-
-def resolve_language_task_key(
-    explicit_key: Optional[str],
-    input_base_dir: str,
-    lang_dict: Dict[str, Any],
-) -> Optional[str]:
-    """Pick YAML language_dict key from --language-task-key or input folder basename."""
-    if explicit_key:
-        if explicit_key in lang_dict:
-            return explicit_key
-        logger.warning("language-task-key %r not found in YAML", explicit_key)
-        return None
-
-    base_path = os.path.abspath(input_base_dir.rstrip(os.sep))
-    infer_path = base_path
-    if _is_date_named_dir(os.path.basename(base_path)):
-        parent = os.path.dirname(base_path)
-        if parent:
-            infer_path = parent
-
-    base = os.path.basename(infer_path)
-    candidates: List[str] = [base]
-    if base.startswith("ego") and len(base) > 3:
-        candidates.append(base[3:])
-
-    seen = set()
-    ordered: List[str] = []
-    for c in candidates:
-        if c not in seen:
-            seen.add(c)
-            ordered.append(c)
-
-    for c in ordered:
-        if c in lang_dict:
-            return c
-
-    logger.warning(
-        "Could not resolve language_dict key from input dir name %r (tried %s)",
-        base,
-        ordered,
-    )
-    return None
-
-
-def language_entry_to_json_serializable(entry: Any) -> Any:
-    """Recursively convert YAML-loaded structures to JSON-safe types."""
-    if isinstance(entry, dict):
-        return {k: language_entry_to_json_serializable(v) for k, v in entry.items() if v is not None}
-    if isinstance(entry, list):
-        return [language_entry_to_json_serializable(x) for x in entry]
-    return entry
-
-
-def write_language_manifest(
-    output_base_dir: str,
-    input_base_dir: str,
-    episode_paths: List[str],
-    yaml_task_key: Optional[str],
-    language_dict_entry: Optional[Dict[str, Any]],
-) -> str:
-    os.makedirs(output_base_dir, exist_ok=True)
-    manifest_path = os.path.join(output_base_dir, "language_manifest.json")
-    episodes = [
-        {
-            "index": i,
-            "episode_pkl": os.path.abspath(p),
-            "source_episode_dir": os.path.abspath(os.path.dirname(p)),
-        }
-        for i, p in enumerate(episode_paths)
-    ]
-    payload = {
-        "yaml_task_key": yaml_task_key,
-        "language_dict_entry": language_entry_to_json_serializable(language_dict_entry)
-        if language_dict_entry is not None
-        else None,
-        "input_base_dir": os.path.abspath(input_base_dir),
-        "episodes": episodes,
-    }
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, ensure_ascii=False)
-    return manifest_path
-
-
 def parse_args() -> argparse.Namespace:
     env = os.environ
     parser = argparse.ArgumentParser(
@@ -711,16 +616,6 @@ def parse_args() -> argparse.Namespace:
         "--force-reprocess",
         action="store_true",
         help="Re-run even if hand_det.pkl exists. Env TRI_CONVERT_FORCE=1 also enables.",
-    )
-    parser.add_argument(
-        "--language-yaml",
-        default="/data/maxshen/Video_data/language_annotations.yaml",
-        help="language_annotations.yaml path (language_dict).",
-    )
-    parser.add_argument(
-        "--language-task-key",
-        default=None,
-        help="language_dict key (e.g. PutKiwiInCenterOfTable). If omitted, inferred from --input-base-dir basename.",
     )
     args = parser.parse_args()
     if env.get("TRI_CONVERT_FORCE", "").strip().lower() in ("1", "true", "yes"):
@@ -799,23 +694,6 @@ def main():
         return 1
     print(f"Found {len(episode_paths)} episode(s).\n")
 
-    yaml_task_key: Optional[str] = None
-    language_dict_entry: Optional[Dict[str, Any]] = None
-    if yaml is None:
-        logger.warning("PyYAML not installed; language_dict_entry in manifest will be null (pip install pyyaml).")
-    elif os.path.isfile(args.language_yaml):
-        try:
-            lang_dict = load_language_dict_from_yaml(args.language_yaml)
-            yaml_task_key = resolve_language_task_key(
-                args.language_task_key, input_base_dir, lang_dict
-            )
-            if yaml_task_key is not None:
-                language_dict_entry = lang_dict.get(yaml_task_key)
-        except Exception:
-            logger.exception("Failed to load %s; manifest will omit language_dict_entry", args.language_yaml)
-    else:
-        logger.warning("language-yaml not found: %s", args.language_yaml)
-
     results = {"success": 0, "skipped": 0, "failed": 0}
     save_camera_params_done = False
 
@@ -845,18 +723,6 @@ def main():
             save_camera_params_done = True
 
         results["success" if success else "failed"] += 1
-
-    try:
-        manifest_path = write_language_manifest(
-            output_base_dir,
-            input_base_dir,
-            episode_paths,
-            yaml_task_key,
-            language_dict_entry,
-        )
-        print(f"\nWrote language manifest: {manifest_path}")
-    except Exception:
-        logger.exception("Failed to write language_manifest.json")
 
     demo_hint = os.path.basename(output_base_dir.rstrip(os.sep)) or "YOUR_DEMO_NAME"
 
