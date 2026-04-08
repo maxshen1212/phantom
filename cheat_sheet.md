@@ -35,21 +35,4 @@ python process_data.py demo_name=TurnMugRightsideUp mode=all --config-name=tri
 conda activate phantom
 pip freeze > /data/maxshen/phantom/requirements_locked.txt
 pip install -r requirements_locked.txt
-
-# convert TRI to EPIC
-cd /data/maxshen/phantom/TRI_scripts/Max/convert
-conda activate tri
-python convert_tri_to_epic.py \
-  --input-base-dir /data/maxshen/Video_data/LBM_human_egocentric/egoTurnMugRightsideUp \
-  --output-base-dir /data/maxshen/phantom/data/raw/TurnMugRightsideUp
-
-# convert all TRI inpainting data processed by Phantom to h5 format
-cd /data/maxshen/phantom/TRI_scripts/Max/convert
-conda activate phantom
-python convert_processed_to_h5_2d.py \
-    --processed_dir /data/maxshen/phantom/data/processed \
-    --lang_annotations /data/maxshen/Video_data/language_annotations.yaml \
-    --output /data/maxshen/phantom/data/h5output/tri_2d_lang_4tasks_allEpisods.h5 \
-    --device cuda \
-    --num_workers 64
 ```

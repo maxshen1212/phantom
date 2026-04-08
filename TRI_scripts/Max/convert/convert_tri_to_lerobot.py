@@ -1,25 +1,118 @@
+# -*- coding: utf-8 -*-
 """Convert TRI LBM_sim_egocentric data to LeRobot v3 dataset for Diffusion Policy.
 
-On NFS or slow storage, decompressing every RGB stream from ``observations.npz``
-is the dominant cost (e.g. tens of minutes per episode for four cameras). **By
-default we load only the main egocentric scene camera** ``scene_right_0``
-(Kyle's first-person view). That cuts I/O and RAM versus multi-camera loads and
-speeds Phase 1 iteration; Masquerade-style pretraining also emphasizes this
-view, so early experiments often skip wrist cameras. Add more views with
-``--cameras ...`` or use ``--all-cameras`` when you need the full set.
+================================================================================
+【總覽:這支腳本實際做了什麼】
+================================================================================
+本檔案是格式轉換器, 不是幾何解算器:
+
+  * 不做 task frame <-> 相機 frame 的剛體轉換; 那一步若在 TRI 管線裡做過,
+    結果已經寫進 observations.npz 的 __xyz / __rot_6d 欄位。
+  * 只做從 npz 逐列讀出 已存在的 float 陣列 -> 依固定順序 concat 成
+    LeRobot 的 observation.state; 影像做逐幀切片; action 做原樣拷貝。
+
+因此「ego」的數學定義以產生 npz 的 TRI 為準;
+訓練時請讓 lbm_eval 端 lerobot_policy_server 用相同語意還原觀測 observation。
+
+================================================================================
+【輸入(每個 episode)】
+================================================================================
+目錄結構 (典型)::
+
+    <task>/.../diffusion_spartan/episode_k/processed/
+        observations.npz   # 含機器人狀態、多相機 RGB 序列 (zip 內多個 .npy)
+        actions.npz         # 含 actions 等
+        metadata.yaml       # camera_id_to_semantic_name、skills 等
+
+observations.npz 內與本腳本相關的陣列 (鍵名為扁平化後的字串):
+
+    robot__actual__poses__right::panda__xyz      shape (T, 3)
+    robot__actual__poses__right::panda__rot_6d   shape (T, 6)
+    robot__actual__grippers__right::panda_hand  shape (T, 1)
+    robot__actual__poses__left::panda__xyz      shape (T, 3)
+    robot__actual__poses__left::panda__rot_6d   shape (T, 6)
+    robot__actual__grippers__left::panda_hand   shape (T, 1)
+    <camera_hardware_id>                         shape (T, H, W, 3)  uint8 RGB
+
+其中 <camera_hardware_id> 透過 metadata.yaml 的
+camera_id_to_semantic_name 對應到語意名 (e.g. scene_right_0)。
+
+================================================================================
+【輸出 (LeRobot v3 dataset)】
+================================================================================
+寫入 --output_dir, 由 LeRobotDataset.create / add_frame / finalize
+建立標準 LeRobot 結構 (含 meta/、episodes、可選影片軌等)。
+
+每個時間步 t 寫入一個 frame 字典::
+
+    "task": str
+    "observation.state": np.ndarray shape (20,), float32
+    "action":            np.ndarray shape (action_dim,), float32  # 通常 20, 與 npz 一致
+    "observation.images.<semantic_name>": np.ndarray (H, W, 3) uint8
+
+================================================================================
+【20 維 observation.state 的拼接順序 (與本檔 EGO_STATE_KEYS 一致)】
+================================================================================
+對每個時間步 t, 僅做 concat, 無其他公式:
+
+    s[t] = [  xyz_r[t] (3)  ;  rot6d_r[t] (6)  ;  g_r[t] (1) ;
+              xyz_l[t] (3)  ;  rot6d_l[t] (6)  ;  g_l[t] (1)  ]
+
+順序為 **右臂 → 左臂** (與鍵名順序相同)。
+
+================================================================================
+【rot_6d 的約定 (本腳本不重新計算, 只轉存)】
+================================================================================
+npz 內的 6 個數須與 TRI / diffusion_policy 管線一致, 對應
+robot_gym.multiarm_spaces_conversions:
+
+  * 設 R ∈ R^{3x3} 為合法旋轉矩陣 (Drake / 列向量為 body 軸在父座標之表達時
+    的慣例與匯出端一致)。
+  * 編碼 (matrix → 6D):
+
+        rot_6d = [ R[0,0], R[0,1], R[0,2], R[1,0], R[1,1], R[1,2] ]
+               = flatten( R[0:2, :] )   # 前 **兩列 row**, 共 6 個元素
+
+  * 解碼 (6D → R) (Gram-Schmidt 正交化, 見 rotation_6d_to_matrix):
+        a1 = d[0:3], a2 = d[3:6]; 正規化 a1; 將 a2 對 a1 去分量後正規化;
+        a3 = a1 x a2; 堆疊成 3x3 旋轉矩陣 (列為正交基)。
+
+**注意**:此與部分論文 / LeRobot XvLA 使用的「取 R 的兩個 column」6D 不同, 若混用會導致旋轉語意錯亂。
+
+================================================================================
+【xyz 的約定】
+================================================================================
+本腳本不變換座標。npz 內 __xyz 一般表示 末端在「主視角相機座標系」下的 平移 (ego-centric position),
+與上述 rot_6d 同一參考座標系; 精確定義以 TRI 錄製匯出為準。
+
+================================================================================
+【action】
+================================================================================
+actions.npz 中鍵 "actions" 的列向量 照原樣 astype(np.float32) 寫入frame["action"]。
+常見情況為與 observation.state 同維 (20)、同順序,
+且為絕對 ego 目標 (仍須以資料集實際內容為準)。
+
+================================================================================
+【效能說明】
+================================================================================
+By default we load only the main egocentric scene camera: scene_right_0
+(Kyle's ego-centric view). Masquerade-style pretraining also emphasizes this
+views.
+Add more views with --cameras ... or use --all-cameras when you need the full set.
 
 Usage:
+    # Full dataset:
     python convert_tri_to_lerobot.py \
         --input_dir /data/maxshen/Video_data/LBM_sim_egocentric/BimanualPlaceAppleFromBowlOnCuttingBoard \
-        --output_repo tri/lbm_sim_ego_full \
-        --output_dir /data/maxshen/lerobot_output_full \
+        --output_repo lbm_sim/ego_BimanualPlaceAppleFromBowlOnCuttingBoard \
+        --output_dir /data/maxshen/lerobot_training_data/ego_BimanualPlaceAppleFromBowlOnCuttingBoard \
         --fps 10
 
     # Quick test (1 episode):
     python convert_tri_to_lerobot.py \
         --input_dir /data/maxshen/Video_data/LBM_sim_egocentric/BimanualPlaceAppleFromBowlOnCuttingBoard \
-        --output_repo tri/lbm_sim_ego \
-        --output_dir /data/maxshen/lerobot_output \
+        --output_repo lbm_sim/ego_BimanualPlaceAppleFromBowlOnCuttingBoard \
+        --output_dir /data/maxshen/lerobot_training_data/ego_BimanualPlaceAppleFromBowlOnCuttingBoard \
         --fps 10 \
         --max_episodes 1
 
@@ -42,9 +135,11 @@ import yaml
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-# Default: single main egocentric RGB (minimal NFS I/O; see module docstring).
+# 預設只載入主第一人稱場景相機; 語意名須出現在該 episode 的 metadata.yaml
 DEFAULT_CAMERAS: tuple[str, ...] = ("scene_right_0",)
 
+# 與 LeRobot observation.state 欄位順序對應; 每項為 (npz 內陣列鍵名, 該段長度)。
+# 拼接公式:state_row = np.concatenate([a0, a1, ... , ai], axis=0), 其中 ai 為該列 t 的子向量。
 EGO_STATE_KEYS: list[tuple[str, int]] = [
     ("robot__actual__poses__right::panda__xyz", 3),
     ("robot__actual__poses__right::panda__rot_6d", 6),
@@ -53,11 +148,12 @@ EGO_STATE_KEYS: list[tuple[str, int]] = [
     ("robot__actual__poses__left::panda__rot_6d", 6),
     ("robot__actual__grippers__left::panda_hand", 1),
 ]
-STATE_DIM = sum(d for _, d in EGO_STATE_KEYS)
+STATE_DIM = sum(d for _, d in EGO_STATE_KEYS)  # 3+6+1+3+6+1 = 20
 ACTIONS_KEY = "actions"
 
 
 def npz_array_shape(path: Path, key: str) -> tuple:
+    """讀 zip-npz 內某個陣列的 header, 取得 shape (不載入完整資料)。"""
     with zipfile.ZipFile(path, "r") as zf:
         with zf.open(key + ".npy") as f:
             version = np.lib.format.read_magic(f)
@@ -69,6 +165,7 @@ def npz_array_shape(path: Path, key: str) -> tuple:
 
 
 def discover_episodes(input_dir: Path) -> list[Path]:
+    """掃描 input_dir 下所有 ``.../processed/observations.npz``, 回傳 processed 目錄路徑列表。"""
     episodes = sorted(
         p.parent
         for p in input_dir.rglob("observations.npz")
@@ -79,6 +176,7 @@ def discover_episodes(input_dir: Path) -> list[Path]:
 
 
 def task_name_from_episode(processed_dir: Path) -> str:
+    """從 metadata.yaml 的 skills 取任務名, 否則從路徑推斷。"""
     meta_path = processed_dir / "metadata.yaml"
     if meta_path.exists():
         meta = yaml.safe_load(meta_path.read_text())
@@ -95,7 +193,12 @@ def task_name_from_episode(processed_dir: Path) -> str:
 def resolve_camera_entries(
     processed_dir: Path, semantic_names: list[str] | None
 ) -> dict[str, str]:
-    """hardware_id -> semantic name. ``semantic_names is None`` means every camera in metadata."""
+    """
+    輸入:某 episode 的 processed 目錄、欲載入的語意相機名列表 (None = 全部)。
+    輸出:dict hardware_id -> semantic_name, 提供從 observations.npz 取 RGB 陣列鍵。
+
+    轉換:僅查表 metadata.yaml 的 camera_id_to_semantic_name。
+    """
     cam_map: dict[str, str] = yaml.safe_load(
         (processed_dir / "metadata.yaml").read_text()
     )["camera_id_to_semantic_name"]
@@ -121,6 +224,23 @@ def convert_episode(
     episode_idx: int,
     camera_names: list[str] | None,
 ) -> int:
+    """
+    單一 episode 轉換。
+
+    輸入檔:
+        processed_dir/observations.npz, processed_dir/actions.npz, metadata.yaml (經 resolve_camera_entries)
+
+    對每個時間步 t (共 T 步):
+        * observation.state:
+              state_all[t] = concat( EGO_STATE_KEYS 各欄第 t row.astype(float32) )
+              維度 (20,)。
+        * action:
+              actions[t].astype(float32), 維度 (action_dim,)
+        * observation.images.<sem>:
+              cam_arrays[sem][t], 維度 (H,W,3), uint8; 公式:I_t = stack[t] (單純索引)
+
+    回傳: 本 episode 的幀數 T。
+    """
     obs_path = processed_dir / "observations.npz"
     act_path = processed_dir / "actions.npz"
 
@@ -139,6 +259,7 @@ def convert_episode(
         assert arr.shape == (T, expected_dim), f"{key}: expected ({T},{expected_dim}), got {arr.shape}"
         state_arrays.append(arr.astype(np.float32))
 
+    # 沿特徵維拼接: state_all[t] = [right block || left block]
     state_all = np.concatenate(state_arrays, axis=1)
     assert state_all.shape == (T, STATE_DIM)
 
@@ -180,20 +301,27 @@ def build_features(
     img_w: int,
     use_videos: bool,
 ) -> dict:
+    """
+    建立 LeRobotDataset.create 所需的 features 描述 dict。
+
+    observation.state 的 names.axes 僅供人類閱讀 metadata; 張量實際順序必須與
+    EGO_STATE_KEYS (右→左)一致。
+    """
     features = {
         "observation.state": {
             "dtype": "float32",
             "shape": (STATE_DIM,),
             "names": {
                 "axes": [
-                    "ego_left_xyz_x", "ego_left_xyz_y", "ego_left_xyz_z",
-                    "ego_left_rot6d_0", "ego_left_rot6d_1", "ego_left_rot6d_2",
-                    "ego_left_rot6d_3", "ego_left_rot6d_4", "ego_left_rot6d_5",
-                    "ego_left_gripper",
+                    # 順序須與 EGO_STATE_KEYS 一致:右腕 → 左腕
                     "ego_right_xyz_x", "ego_right_xyz_y", "ego_right_xyz_z",
                     "ego_right_rot6d_0", "ego_right_rot6d_1", "ego_right_rot6d_2",
                     "ego_right_rot6d_3", "ego_right_rot6d_4", "ego_right_rot6d_5",
                     "ego_right_gripper",
+                    "ego_left_xyz_x", "ego_left_xyz_y", "ego_left_xyz_z",
+                    "ego_left_rot6d_0", "ego_left_rot6d_1", "ego_left_rot6d_2",
+                    "ego_left_rot6d_3", "ego_left_rot6d_4", "ego_left_rot6d_5",
+                    "ego_left_gripper",
                 ],
             },
         },
@@ -298,7 +426,7 @@ def main():
 
     logger.info(f"Image shape: ({img_h}, {img_w}, 3), Action dim: {action_dim}")
     logger.info(f"Cameras: {list(cam_entries.values())}")
-    logger.info(f"State dim: {STATE_DIM} (ego-flipped 20D)")
+    logger.info(f"State dim: {STATE_DIM} (bimanual ego proprioception, right then left)")
     logger.info(f"Video codec: {vcodec}")
 
     features = build_features(action_dim, cam_entries, img_h, img_w, args.use_videos)
