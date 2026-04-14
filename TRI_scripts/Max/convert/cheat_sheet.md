@@ -1,5 +1,7 @@
 ```bash
-# convert TRI to EPIC
+################## Phantom #####################
+
+# convert TRI to EPIC format
 conda activate tri
 cd /data/maxshen/phantom/TRI_scripts/Max/convert
 python convert_tri_to_epic.py \
@@ -16,33 +18,39 @@ python convert_processed_to_h5_2d.py \
     --device cuda \
     --num_workers 64
 
+################## LeRobot #####################
+
 # convert TRI simulation egocentric data to LeRobot training data
 conda activate lbm
-cd /data/maxshen/phantom/TRI_scripts/Max/convert
-python convert_tri_to_lerobot.py \
-        --input_dir /data/maxshen/Video_data2/LBM_sim_egocentric/BimanualPlaceAppleFromBowlOnCuttingBoard \
+python /data/maxshen/phantom/TRI_scripts/Max/convert/convert_tri_to_lerobot.py \
+        --input_dir /data/maxshen/Video_data_v2/LBM_sim_egocentric/BimanualPlaceAppleFromBowlOnCuttingBoard \
         --output_repo lbm_sim/ego_BimanualPlaceAppleFromBowlOnCuttingBoard \
-        --output_dir /data/maxshen/lerobot_training_data/ego_BimanualPlaceAppleFromBowlOnCuttingBoard \
-        --fps 10
+        --output_dir /data/maxshen/lerobot_training_data_v2/ego_BimanualPlaceAppleFromBowlOnCuttingBoard \
+        --vcodec libsvtav1
 
 # convert TRI simulation egocentric data to LeRobot training data
 conda activate lbm
-cd /data/maxshen/phantom/TRI_scripts/Max/convert
-python convert_tri_to_lerobot.py \
-        --input_dir /data/maxshen/Video_data2/LBM_sim_egocentric/PutBananaOnSaucer \
+python /data/maxshen/phantom/TRI_scripts/Max/convert/convert_tri_to_lerobot.py \
+        --input_dir /data/maxshen/Video_data_v2/LBM_sim_egocentric/PutBananaOnSaucer \
         --output_repo lbm_sim/ego_PutBananaOnSaucer \
-        --output_dir /data/maxshen/lerobot_training_data/ego_PutBananaOnSaucer \
-        --fps 10
+        --output_dir /data/maxshen/lerobot_training_data_v2/ego_PutBananaOnSaucer \
+        --vcodec libsvtav1
 
 # convert TRI simulation egocentric data to LeRobot training data
 conda activate lbm
-cd /data/maxshen/phantom/TRI_scripts/Max/convert
-python convert_tri_to_lerobot.py \
-        --input_dir /data/maxshen/Video_data2/LBM_sim_egocentric/PutKiwiInCenterOfTable \
+python /data/maxshen/phantom/TRI_scripts/Max/convert/convert_tri_to_lerobot.py \
+        --input_dir /data/maxshen/Video_data_v2/LBM_sim_egocentric/PutKiwiInCenterOfTable \
         --output_repo lbm_sim/ego_PutKiwiInCenterOfTable \
-        --output_dir /data/maxshen/lerobot_training_data/ego_PutKiwiInCenterOfTable \
-        --fps 10
+        --output_dir /data/maxshen/lerobot_training_data_v2/ego_PutKiwiInCenterOfTable \
+        --vcodec libsvtav1
 
+# Quick test (1 episode):
+python /data/maxshen/phantom/TRI_scripts/Max/convert/convert_tri_to_lerobot.py \
+        --input_dir /data/maxshen/Video_data_v2/LBM_sim_egocentric/BimanualPlaceAppleFromBowlOnCuttingBoard \
+        --output_repo lbm_sim/ego_BimanualPlaceAppleFromBowlOnCuttingBoard \
+        --output_dir /data/maxshen/lerobot_training_data_v2/ego_BimanualPlaceAppleFromBowlOnCuttingBoard \
+        --vcodec libsvtav1 \
+        --max_episodes 1
 
-python /data/maxshen/phantom/TRI_scripts/Max/convert/inspect_tri_npz.py /data/maxshen/Video_data2/LBM_sim_egocentric/BimanualPlaceAppleFromBowlOnCuttingBoard/riverway/sim/bc/teleop/2025-01-06T14-24-17-05-00/diffusion_spartan/episode_0/processed --frame 0
+python /data/maxshen/phantom/TRI_scripts/Max/convert/inspect_tri_npz.py /data/maxshen/Video_data_v2/LBM_sim_egocentric/BimanualPlaceAppleFromBowlOnCuttingBoard/riverway/sim/bc/teleop/2025-01-06T14-24-17-05-00/diffusion_spartan/episode_0/processed --frame 0
 ```
